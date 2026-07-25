@@ -1,6 +1,6 @@
 # STATE.md — read this first
 
-**Last updated:** 2026-07-25 · **git SHA:** _(initial commit — see `git log -1`)_
+**Last updated:** 2026-07-26 · **git SHA:** `183bca5` · **CI: green ✅**
 **Competition deadline:** model submissions 2026-08-27 23:59 UTC · write-up 2026-09-15
 **Entry:** solo · **Units remaining: 733.00 / 733** (everything so far ran on CPU, 0 units)
 
@@ -41,8 +41,11 @@ Everything so far has run on **CPU for zero units**.
   `lo_alignment(backend="embedding")` implemented and **validated end-to-end on CPU**.
 - **Submission**: 1.29 MB zip, `main.py` at root, **all 16 verify checks pass**, smoke run
   4.3 s → **0.126 h projected** for the full test set (cap 6 h).
-- **Quality gates**: ruff clean · mypy clean (39 files) · 41 tests pass · `selftest.all`
-  green in 15.5 s.
+- **Quality gates**: ruff clean · mypy clean (41 files) · **45 tests pass** · `selftest.all`
+  green in 23 s · **GitHub Actions CI green** (verified tests actually collect — they
+  previously did not).
+- **Artifact namespacing**: subsampled runs write to `<experiment>__subN` for OOF *and*
+  model dirs, so a smoke run can never corrupt a full-data result or a submission.
 
 ## Known problems / open risks
 1. **The margin over the baseline is still thin** (−0.0088). Most of the model's power is the
