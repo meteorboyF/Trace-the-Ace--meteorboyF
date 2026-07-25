@@ -1,0 +1,94 @@
+[project]
+name = "traceace"
+version = "0.1.0"
+description = "Trace the Ace — student-outcome prediction from tutoring transcripts (DrivenData)"
+readme = "README.md"
+# Match the competition inference runtime EXACTLY: it is ">=3.12,<3.13".
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "meteorboyF" }]
+
+# Abstract deps. Concrete pins for Colab live in requirements-colab.txt, which is
+# reconciled against the official runtime's runtime/pyproject.toml (see docs/EXTERNAL_ASSETS.md).
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "lightgbm",
+    "pyyaml",
+    "tqdm",
+    "scipy",
+    "joblib",
+]
+
+[project.optional-dependencies]
+# Everything below is CPU/Colab-only and is NEVER imported by the packaged submission main.py.
+dev = [
+    "pyarrow",       # parquet io on Colab (transitively present in runtime via `datasets`)
+    "zstandard",     # tar.zst rollups for Drive sync (dev-only)
+    "matplotlib",    # figures for interpret.report (dev-only, never at inference)
+    "ruff",
+    "mypy",
+    "pytest",
+    "types-PyYAML",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ---------------------------------------------------------------------------
+# Lint / format
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "tools"]
+# Generated/vendored output and data dirs are not our source and must not be linted.
+extend-exclude = [
+    "submission",
+    "data",
+    "artifacts",
+    "runs",
+    ".venv",
+    "notebooks",
+]
+
+[tool.ruff.lint]
+# Sensible, competition-grade set: pyflakes, pycodestyle, isort, bugbear, pyupgrade, comprehensions.
+select = ["E", "F", "W", "I", "B", "UP", "C4", "SIM"]
+ignore = [
+    "E501",   # line length handled by formatter; long docstrings are fine
+    "B905",   # zip() strict= not always desired
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "SIM"]
+
+# ---------------------------------------------------------------------------
+# Type checking
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+files = ["src/traceace"]
+ignore_missing_imports = true       # lightgbm/sklearn stubs are incomplete upstream
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+# Pragmatic: we type public surfaces; third-party-heavy internals stay lenient.
+disallow_untyped_defs = false
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]

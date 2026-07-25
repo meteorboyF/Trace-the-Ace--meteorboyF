@@ -1,0 +1,77 @@
+# Trace the Ace — base configuration.
+# Everything tunable and every "magic number" lives here, never hardcoded in code.
+# Task-specific overrides live in conf/experiments/*.yaml and are merged over this.
+
+seed: 1234
+
+# --- Cross-validation ---------------------------------------------------------
+# Folds group by session_id (NEVER response_id). See docs/BRIEF.md §10.
+cv:
+  n_splits: 5
+  strategy: stratified_group   # StratifiedGroupKFold(groups=session_id, y=correct)
+  group_col: session_id
+  label_col: correct
+
+# --- Label handling -----------------------------------------------------------
+# Log loss blows up at exactly 0/1. Clip predictions into [eps, 1-eps].
+predict_clip_eps: 1.0e-6
+
+# --- Compute budget -----------------------------------------------------------
+# VERIFY these against Colab's live Resources panel and update here — never hardcode
+# unit rates in code. Units burn while the runtime is CONNECTED, not while computing.
+budget:
+  total_units: 733
+  # approx compute units per hour by tier (Colab Pro+, verify live)
+  unit_rates:
+    cpu: 0.0
+    t4: 2.0
+    l4: 5.0
+    a100: 12.0
+    h100: 20.0
+    other: 0.0
+  idle_warn_minutes: 20        # idle watchdog threshold on a paid tier
+
+# --- Progress / logging -------------------------------------------------------
+progress:
+  heartbeat_seconds: 30        # heartbeat() prints elapsed every N seconds
+
+# --- Paths (relative to the working root; see paths.py) ------------------------
+paths:
+  raw: data/raw
+  interim: data/interim
+  features: data/features
+  models: artifacts/models
+  oof: artifacts/oof
+  figures: artifacts/figures
+  logs: artifacts/logs
+  runs: runs
+  submission: submission
+
+# --- Canonical raw filenames (data.ingest normalizes suffixed downloads to these) --
+canonical_files:
+  train_features: train_features.csv
+  train_labels: train_labels.csv
+  submission_format: submission_format.csv
+  submission_format_smoke: submission_format_smoke.csv
+  transcripts_zip: train_transcripts.zip
+  transcripts_dir: train_transcripts
+
+# --- Self-test / smoke sizing -------------------------------------------------
+selftest:
+  n_responses: 200
+  n_sessions: 50
+  max_seconds: 300
+
+# --- Embeddings ---------------------------------------------------------------
+# Frozen extraction on L4, cached forever. Model must be commercial-use licensed.
+embeddings:
+  model_name: answerdotai/ModernBERT-base   # Apache-2.0; in runtime via sentence-transformers
+  max_tokens: 8192
+  batch_size: 32
+  cache_version: v1
+
+# --- Tokenizer used for eda.inference_budget token counts ---------------------
+tokenizer:
+  # tiktoken cl100k_base is a fast, license-clean proxy for "LLM tokens".
+  # For encoder budgets we also report the HF tokenizer count in eda.transcripts.
+  tiktoken_encoding: cl100k_base

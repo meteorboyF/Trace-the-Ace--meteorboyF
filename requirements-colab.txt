@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# Colab install list for Trace the Ace.
+#
+# RECONCILED against the official inference runtime
+# (drivendataorg/tutoring-outcomes-runtime :: runtime/pyproject.toml, Python >=3.12,<3.13).
+# See docs/EXTERNAL_ASSETS.md for the full audit. Summary:
+#   * Everything the PACKAGED SUBMISSION imports is present in the runtime image:
+#     numpy, pandas, scikit-learn, lightgbm, torch(2.11.0+cu129), transformers,
+#     sentence-transformers, tokenizers, tiktoken, safetensors, scipy.
+#   * pyarrow is NOT a top-level runtime dep but is present transitively (via `datasets`);
+#     regardless, submission main.py never touches parquet, so it is dev-only for us.
+#   * matplotlib + zstandard are NOT in the runtime and are DEV/COLAB-ONLY (figures, Drive
+#     rollups). They are never imported at inference, so no package-addition request is needed.
+#
+# On Colab most heavy packages are pre-installed. This file pins the ones our code imports
+# so a fresh runtime is reproducible. Versions chosen to be compatible with the runtime image;
+# do NOT pin torch here (Colab ships a CUDA-matched build).
+# ---------------------------------------------------------------------------
+
+# --- core numerical / modeling (submission-critical: keep loadable in the runtime) ---
+numpy>=2.0
+pandas>=2.2
+scikit-learn>=1.5
+lightgbm>=4.5          # model artifact must load in runtime; runtime ships lightgbm
+scipy>=1.13
+joblib>=1.3
+
+# --- io / config / progress ---
+pyyaml>=6.0
+tqdm>=4.66
+pyarrow>=16.0          # dev/Colab parquet io (transitively in runtime via datasets)
+zstandard>=0.22        # dev-only: tar.zst rollups for Drive
+
+# --- embeddings (frozen extraction on L4; runtime ships these) ---
+sentence-transformers>=3.0
+transformers>=4.44
+tokenizers>=0.19
+tiktoken>=0.7          # exact token counting for eda.inference_budget
+
+# --- linguistics / interpret (CPU) ---
+matplotlib>=3.8        # dev-only: figures for interpret.report

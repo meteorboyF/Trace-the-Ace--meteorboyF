@@ -1,0 +1,167 @@
+"""Staging between Google Drive and the local working disk.
+
+The storage rule (docs/BRIEF.md §8): **Drive holds a handful of large files; the
+local SSD (`/content/work`) is the working disk.** Reading thousands of small
+transcript CSVs directly off the Drive FUSE mount would take hours. So:
+
+* :func:`stage_local` copies the single raw archive Drive -> local, extracts it
+  **locally**, and is a no-op if already staged. Re-staging after a Colab reset
+  must cost under a minute (one big sequential copy, not per-file).
+* :func:`sync_to_drive` is the ONLY function that writes to Drive, and it tars
+  first so we push a handful of large files, never a directory tree.
+* Extraction *to* Drive is impossible by construction: extraction always targets
+  the local working root, and :func:`~traceace.paths.assert_not_drive` guards the
+  iteration paths.
+
+Locally (``drive_root is None``) staging is a no-op: the data already sits in
+``data/raw/`` on the working disk.
+"""
+
+from __future__ import annotations
+
+import shutil
+import tarfile
+import time
+import zipfile
+from pathlib import Path
+
+from .config import get_config
+from .logging_utils import get_logger
+from .paths import assert_not_drive, raw_dir, transcripts_dir, work_root
+from .progress import heartbeat, pbar
+
+log = get_logger("staging")
+
+
+def _drive_raw_zip() -> Path | None:
+    """Path to ``data/raw.zip`` on Drive, or None when running locally."""
+    cfg = get_config()
+    if cfg.drive_root is None:
+        return None
+    return cfg.drive_root / "data" / "raw.zip"
+
+
+def is_staged() -> bool:
+    """True if the transcripts directory is already extracted locally."""
+    tdir = transcripts_dir()
+    if not tdir.is_dir():
+        return False
+    # cheap check: at least one csv present
+    try:
+        next(tdir.glob("*.csv"))
+        return True
+    except StopIteration:
+        return False
+
+
+def stage_local(force: bool = False) -> Path:
+    """Ensure raw data is present and extracted on the local working disk.
+
+    Returns the local ``data/raw`` directory. No-op if already staged (loud skip).
+
+    On Colab: copies ``<drive>/data/raw.zip`` to the local working root and extracts
+    it there. Locally: verifies ``data/raw/`` already holds the files (and extracts
+    the transcripts zip if the directory is missing).
+    """
+    cfg = get_config()
+    rdir = raw_dir()
+    rdir.mkdir(parents=True, exist_ok=True)
+
+    if is_staged() and not force:
+        log.info("stage_local: already staged at %s (skip; force=True to redo)", rdir)
+        return rdir
+
+    drive_zip = _drive_raw_zip()
+    if drive_zip is not None and drive_zip.is_file():
+        # Colab path: one big sequential copy off Drive, then extract locally.
+        local_zip = work_root() / "raw.zip"
+        log.info("stage_local: copying %s -> %s", drive_zip, local_zip)
+        with heartbeat("copy raw.zip from Drive"):
+            shutil.copyfile(drive_zip, local_zip)
+        _extract_archive(local_zip, rdir)
+    else:
+        # Local path: data already in data/raw/. Extract transcripts zip if needed.
+        tzip = rdir / cfg.canonical_files["transcripts_zip"]
+        if tzip.is_file() and not transcripts_dir().is_dir():
+            _extract_archive(tzip, transcripts_dir().parent, into_named_dir=True)
+
+    log.info("stage_local: staged at %s", rdir)
+    return rdir
+
+
+def _extract_archive(archive: Path, dest_dir: Path, into_named_dir: bool = False) -> None:
+    """Extract a zip to a LOCAL destination. Refuses to extract onto Drive."""
+    dest_dir = assert_not_drive(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive) as zf:
+        members = zf.namelist()
+        # If every member is a bare "<session>.csv", drop them into a named subdir
+        # so the transcripts live under data/raw/train_transcripts/.
+        target = dest_dir
+        if into_named_dir:
+            target = transcripts_dir()
+            target.mkdir(parents=True, exist_ok=True)
+        for m in pbar(members, desc=f"extract {archive.name}", unit="file"):
+            zf.extract(m, target)
+
+
+def sync_to_drive(local_path: Path, drive_rel: str, as_tar: bool = True) -> Path | None:
+    """Push a local file/dir to Drive as a SINGLE archive (the only Drive writer).
+
+    Parameters
+    ----------
+    local_path:
+        Local file or directory to sync.
+    drive_rel:
+        Destination path relative to ``drive_root`` (e.g. ``artifacts/rollup.tar.zst``).
+    as_tar:
+        If ``local_path`` is a directory, tar it first so we write one big file to
+        Drive instead of walking a tree over FUSE.
+
+    Returns the Drive destination path, or ``None`` when running locally.
+    """
+    cfg = get_config()
+    if cfg.drive_root is None:
+        log.info("sync_to_drive: local mode, nothing to sync (%s)", local_path)
+        return None
+
+    dest = cfg.drive_root / drive_rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    local_path = Path(local_path)
+
+    if local_path.is_dir() and as_tar:
+        tmp_tar = work_root() / (local_path.name + ".tar")
+        log.info("sync_to_drive: tarring %s -> %s", local_path, tmp_tar)
+        with heartbeat("tar for Drive sync"), tarfile.open(tmp_tar, "w") as tf:
+            tf.add(local_path, arcname=local_path.name)
+        with heartbeat("write tar to Drive"):
+            shutil.copyfile(tmp_tar, dest)
+    else:
+        with heartbeat("write file to Drive"):
+            shutil.copyfile(local_path, dest)
+    log.info("sync_to_drive: wrote %s", dest)
+    return dest
+
+
+class CheckpointSyncer:
+    """Sync an output on a time interval so a disconnect costs at most one interval.
+
+    Usage::
+
+        cp = CheckpointSyncer(interval_seconds=600)
+        for i, batch in enumerate(batches):
+            ...
+            cp.maybe_sync(local_dir, "artifacts/embeddings")
+    """
+
+    def __init__(self, interval_seconds: float = 600.0) -> None:
+        self.interval = interval_seconds
+        self._last = time.monotonic()
+
+    def maybe_sync(self, local_path: Path, drive_rel: str) -> bool:
+        now = time.monotonic()
+        if now - self._last >= self.interval:
+            sync_to_drive(local_path, drive_rel)
+            self._last = now
+            return True
+        return False

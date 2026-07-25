@@ -1,0 +1,51 @@
+# ============================================================
+# DATA PROTECTION — competition rules prohibit redistribution.
+# These patterns MUST stay. Do not loosen without reading COMPETITION.md.
+# ============================================================
+data/
+artifacts/
+runs/
+# The whole submission/ tree is BUILD OUTPUT derived from competition data
+# (model bundles, staged zips, smoke working dirs). Regenerate with
+# tasks.run("submission.build"). Never commit any of it.
+submission/
+*.zip
+*.csv
+*.parquet
+*.pt
+*.bin
+*.safetensors
+*.pth
+*.onnx
+*.joblib
+*.pkl
+train_*
+test_*
+submission_format*
+submission.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Allow-list: keep small text fixtures & configs that tests need
+!tests/fixtures/**
+!conf/**/*.yaml
+!docs/**/*.md

@@ -1,0 +1,353 @@
+"""Submission verification — loud, paranoid, and worth more than a clever model.
+
+Only **three full submissions per week** are allowed (~15 real attempts remain), and a
+rules violation risks disqualification rather than a bad score. So ``submission.verify``
+fails hard on every failure mode in §12:
+
+* ``main.py`` not at the zip root (a wrapping folder is the classic fatal mistake)
+* row set or ordering mismatch against ``submission_format.csv``
+* probabilities outside [0,1], NaN, or missing ``response_id``
+* **any print/log that could emit test data** — a static AST scan of ``main.py`` and the
+  modules it ships, rejecting prints of non-literal values in data-handling code
+* progress bars not disabled
+* imports that could touch the network
+* projected runtime above 4.5 h against the 6 h cap
+* zip above 55 GB, or total log lines above 400
+
+Each check returns a structured result; the task raises unless ``strict=False``.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from ..io import load_submission_format
+from ..logging_utils import get_logger
+from ..paths import submission_dir
+from ..tasks import task
+
+log = get_logger("submission.verify")
+
+# Modules that imply network access inside a no-network container.
+NETWORK_MODULES = {
+    "requests",
+    "urllib",
+    "urllib3",
+    "httpx",
+    "http",
+    "aiohttp",
+    "socket",
+    "ftplib",
+    "telnetlib",
+    "smtplib",
+    "boto3",
+    "botocore",
+    "gcsfs",
+    "s3fs",
+    "paramiko",
+    "huggingface_hub",
+    "datasets",
+    "wandb",
+    "mlflow",
+    "gdown",
+}
+# Functions whose output could leak test data if given a non-literal argument.
+EMITTERS = {"print", "pprint"}
+LOGGER_METHODS = {"info", "warning", "error", "debug", "exception", "critical"}
+
+MAX_ZIP_GB = 55.0
+MAX_PROJECTED_HOURS = 4.5
+MAX_LOG_LINES = 400
+
+
+@dataclass
+class Check:
+    name: str
+    passed: bool
+    detail: str = ""
+
+
+@dataclass
+class VerifyResult:
+    checks: list[Check] = field(default_factory=list)
+
+    def add(self, name: str, passed: bool, detail: str = "") -> None:
+        self.checks.append(Check(name, passed, detail))
+
+    @property
+    def failures(self) -> list[Check]:
+        return [c for c in self.checks if not c.passed]
+
+    @property
+    def ok(self) -> bool:
+        return not self.failures
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "n_checks": len(self.checks),
+            "n_failures": len(self.failures),
+            "checks": [
+                {"name": c.name, "passed": c.passed, "detail": c.detail} for c in self.checks
+            ],
+        }
+
+
+# --- static scan -------------------------------------------------------------
+def _is_static_literal(node: ast.AST) -> bool:
+    """True if the expression is a compile-time constant string/number.
+
+    ``print("start")`` is fine. ``print(f"n={n}")`` or ``print(len(df))`` is not — an
+    f-string or any call/name could carry test-derived values.
+    """
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, ast.JoinedStr):  # f-string: only safe if it has no interpolation
+        return all(isinstance(v, ast.Constant) for v in node.values)
+    if isinstance(node, ast.BinOp):  # "a" + "b"
+        return _is_static_literal(node.left) and _is_static_literal(node.right)
+    return False
+
+
+def _sanctioned_wrapper_spans(tree: ast.AST) -> list[tuple[int, int, set[str]]]:
+    """Line spans of the sanctioned static-logging wrapper ``def log(msg: str)``.
+
+    ``main.py`` funnels all output through one tiny wrapper whose body is
+    ``print(msg)``. Inside that definition ``msg`` is necessarily a Name, so a naive
+    scan flags it forever. We allow printing the wrapper's *own parameters* inside the
+    wrapper, and keep enforcing that every **call site** passes a literal — which is
+    where a real leak would actually originate.
+    """
+    spans: list[tuple[int, int, set[str]]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in {"log", "_log"}:
+            params = {a.arg for a in node.args.args}
+            spans.append((node.lineno, node.end_lineno or node.lineno, params))
+    return spans
+
+
+def scan_source(source: str, filename: str) -> tuple[list[str], list[str]]:
+    """Return (data_leak_findings, network_findings) for one source file."""
+    leaks: list[str] = []
+    net: list[str] = []
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError as exc:
+        return [f"{filename}: unparseable ({exc})"], []
+
+    wrapper_spans = _sanctioned_wrapper_spans(tree)
+
+    def _allowed_in_wrapper(call: ast.Call) -> bool:
+        for start, end, params in wrapper_spans:
+            if start <= call.lineno <= end:
+                # only bare parameter names of the wrapper are allowed
+                return all(isinstance(a, ast.Name) and a.id in params for a in call.args)
+        return False
+
+    for node in ast.walk(tree):
+        # imports that could reach the network
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                root = a.name.split(".")[0]
+                if root in NETWORK_MODULES:
+                    net.append(f"{filename}:{node.lineno} imports {a.name}")
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            if root in NETWORK_MODULES:
+                net.append(f"{filename}:{node.lineno} imports from {node.module}")
+
+        # emitting calls
+        if isinstance(node, ast.Call):
+            fname = None
+            if isinstance(node.func, ast.Name):
+                fname = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                fname = node.func.attr
+
+            is_emitter = fname in EMITTERS or fname in LOGGER_METHODS
+            # our own single-argument static logger wrapper is allowed
+            if fname == "log" and isinstance(node.func, ast.Name):
+                is_emitter = True
+
+            if is_emitter and not _allowed_in_wrapper(node):
+                for arg in node.args:
+                    if not _is_static_literal(arg):
+                        leaks.append(
+                            f"{filename}:{node.lineno} {fname}() emits a non-literal value"
+                        )
+                        break
+    return leaks, net
+
+
+def check_progress_disabled(source: str) -> bool:
+    """main.py must set the progress kill-switch before importing anything bar-capable."""
+    return ("TRACEACE_PROGRESS" in source and '"0"' in source) or "TQDM_DISABLE" in source
+
+
+# --- zip / output checks -----------------------------------------------------
+def verify_zip(zip_path: Path, result: VerifyResult) -> dict[str, str]:
+    """Structural checks on the archive; returns {name: source} for shipped .py files."""
+    sources: dict[str, str] = {}
+    if not zip_path.is_file():
+        result.add("zip_exists", False, f"{zip_path} not found")
+        return sources
+    result.add("zip_exists", True, str(zip_path))
+
+    size_gb = zip_path.stat().st_size / 1e9
+    result.add("zip_size_under_55gb", size_gb <= MAX_ZIP_GB, f"{size_gb:.3f} GB")
+
+    with zipfile.ZipFile(zip_path) as zf:
+        names = zf.namelist()
+        # main.py must be at the ROOT — not nested in a folder
+        result.add(
+            "main_py_at_zip_root",
+            "main.py" in names,
+            f"top-level entries: {sorted({n.split('/')[0] for n in names})}",
+        )
+        for n in names:
+            if n.endswith(".py"):
+                sources[n] = zf.read(n).decode("utf-8", errors="replace")
+    return sources
+
+
+def verify_predictions(sub_csv: Path, result: VerifyResult, smoke: bool = False) -> None:
+    """Row set, ordering, and value-range checks against the official format."""
+    if not sub_csv.is_file():
+        result.add("submission_csv_exists", False, f"{sub_csv} not found")
+        return
+    result.add("submission_csv_exists", True, str(sub_csv))
+
+    got = pd.read_csv(sub_csv, dtype={"response_id": str})
+    want = load_submission_format(smoke=smoke)
+
+    result.add(
+        "columns_exact",
+        list(got.columns) == ["response_id", "probability"],
+        f"got {list(got.columns)}",
+    )
+    result.add("row_count_matches", len(got) == len(want), f"{len(got)} vs {len(want)}")
+    result.add("no_missing_response_id", not got["response_id"].isna().any())
+    result.add("row_set_matches", set(got["response_id"]) == set(want["response_id"]))
+    result.add(
+        "row_ORDER_matches",
+        got["response_id"].tolist() == want["response_id"].tolist(),
+        "ordering must match submission_format.csv exactly",
+    )
+
+    p = pd.to_numeric(got["probability"], errors="coerce").to_numpy()
+    result.add("no_nan_probabilities", bool(np.isfinite(p).all()))
+    if np.isfinite(p).all():
+        result.add(
+            "probabilities_in_unit_interval",
+            bool((p >= 0).all() and (p <= 1).all()),
+            f"min={p.min():.6f} max={p.max():.6f}",
+        )
+        # exact 0/1 is legal but log-loss suicidal; warn via a check
+        result.add(
+            "probabilities_clipped_off_0_and_1",
+            bool((p > 0).all() and (p < 1).all()),
+            "exact 0 or 1 produces infinite log loss if wrong",
+        )
+
+
+def project_runtime(
+    n_test: int, seconds_for_sample: float, n_sample: int, result: VerifyResult
+) -> float:
+    """Scale a measured sample runtime to the full test set and check the 4.5h budget."""
+    if n_sample <= 0:
+        result.add("runtime_projection", False, "no sample timing available")
+        return float("nan")
+    hours = (seconds_for_sample / n_sample) * n_test / 3600.0
+    result.add(
+        "projected_runtime_under_4.5h",
+        hours <= MAX_PROJECTED_HOURS,
+        f"projected {hours:.2f} h for {n_test} rows (cap 6 h, budget 4.5 h)",
+    )
+    return hours
+
+
+@task(
+    "submission.verify",
+    requires="cpu",
+    max_tier="cpu",
+    description="hard checks on submission.zip: format, leakage, prints, network, runtime",
+)
+def verify(
+    zip_name: str = "submission.zip",
+    submission_csv: str | None = None,
+    force: bool = False,
+    subsample: int | None = None,
+    smoke: bool = False,
+    strict: bool = True,
+    n_log_lines: int | None = None,
+) -> dict[str, Any]:
+    sdir = submission_dir()
+    result = VerifyResult()
+
+    sources = verify_zip(sdir / zip_name, result)
+
+    # --- static scans over every python file we ship ------------------------
+    all_leaks: list[str] = []
+    all_net: list[str] = []
+    for name, src in sources.items():
+        leaks, net = scan_source(src, name)
+        all_leaks += leaks
+        all_net += net
+    result.add(
+        "no_test_data_in_logs",
+        not all_leaks,
+        "; ".join(all_leaks[:6]) or "no non-literal emissions",
+    )
+    result.add(
+        "no_network_imports", not all_net, "; ".join(all_net[:6]) or "no network-capable imports"
+    )
+
+    main_src = sources.get("main.py", "")
+    result.add(
+        "progress_bars_disabled",
+        check_progress_disabled(main_src),
+        "main.py must set TRACEACE_PROGRESS=0 / TQDM_DISABLE=1 before imports",
+    )
+
+    if n_log_lines is not None:
+        result.add("log_lines_under_400", n_log_lines <= MAX_LOG_LINES, f"{n_log_lines} lines")
+
+    # --- output checks ------------------------------------------------------
+    csv_path = Path(submission_csv) if submission_csv else sdir / "_staging" / "submission.csv"
+    if csv_path.is_file():
+        verify_predictions(csv_path, result, smoke=smoke)
+    else:
+        result.add(
+            "submission_csv_exists",
+            False,
+            f"{csv_path} not found (run submission.smoke to produce one)",
+        )
+
+    payload = result.to_dict()
+    out = sdir / "verify_report.json"
+    out.write_text(json.dumps(payload, indent=2))
+    payload["output_path"] = str(out)
+
+    for c in result.checks:
+        log.log(
+            20 if c.passed else 40,
+            "%s %s %s",
+            "PASS" if c.passed else "FAIL",
+            c.name,
+            f"({c.detail})" if c.detail else "",
+        )
+
+    if strict and not result.ok:
+        raise AssertionError(
+            f"submission.verify FAILED {len(result.failures)} check(s): "
+            + "; ".join(f"{c.name}: {c.detail}" for c in result.failures)
+        )
+    return payload

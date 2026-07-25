@@ -1,0 +1,22 @@
+# Run `pre-commit install` to activate. A native mirror lives in .git/hooks/pre-commit
+# so protection works even without the framework installed.
+repos:
+  - repo: local
+    hooks:
+      - id: block-data-and-large-files
+        name: block competition data & files >1MB
+        entry: python tools/precommit_guard.py
+        language: system
+        pass_filenames: true
+      - id: ruff
+        name: ruff lint
+        entry: ruff check
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format check
+        entry: ruff format --check
+        language: system
+        types: [python]
+        pass_filenames: false
