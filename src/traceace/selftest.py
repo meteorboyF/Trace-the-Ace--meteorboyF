@@ -77,6 +77,7 @@ def all_(
     step("features.linguistic", subsample=n_sessions, force=force)
     step("features.temporal", subsample=n_sessions, force=force)
     step("features.lo_alignment", subsample=n_sessions, force=force)
+    step("features.feedback", subsample=n_sessions, force=force)
 
     step("baseline.prior", subsample=n_sessions)
     step("baseline.lo_only", subsample=n_sessions)

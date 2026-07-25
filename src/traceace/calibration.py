@@ -20,6 +20,7 @@ from .cv import load_folds
 from .evaluate import (
     clip_probs,
     expected_calibration_error,
+    experiment_dir,
     load_oof,
     logloss,
     save_oof,
@@ -27,7 +28,7 @@ from .evaluate import (
 )
 from .io import LABEL_COL
 from .logging_utils import get_logger
-from .paths import models_dir, runs_dir
+from .paths import runs_dir
 from .progress import pbar
 from .tasks import task
 
@@ -80,7 +81,7 @@ def fit(
     """Compare no-calibration / Platt / isotonic on OOF, using an inner fold loop."""
     import joblib
 
-    oof = load_oof(experiment)
+    oof = load_oof(experiment, subsample=subsample)
     folds = load_folds(subsample=subsample)[["response_id", "fold"]]
     df = oof.merge(folds, on="response_id", how="left")
     if df["fold"].isna().any():
@@ -131,14 +132,14 @@ def fit(
         best_fitter, _ = methods[best]
         assert best_fitter is not None  # "none" is the only entry with a null fitter
         final = best_fitter(p, y)
-        mdir = models_dir() / experiment.replace(".", "_")
+        mdir = experiment_dir(experiment, subsample)
         mdir.mkdir(parents=True, exist_ok=True)
         joblib.dump({"method": best, "model": final}, mdir / "calibrator.joblib")
 
     cal_exp = f"{experiment}.calibrated"
     out = df[["response_id", "session_id", LABEL_COL]].copy()
     out["pred"] = calibrated[best]
-    save_oof(cal_exp, out)
+    save_oof(cal_exp, out, subsample=subsample)
 
     res: dict[str, Any] = {
         "experiment": experiment,

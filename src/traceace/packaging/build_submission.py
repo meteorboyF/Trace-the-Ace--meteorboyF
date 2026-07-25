@@ -26,9 +26,10 @@ from typing import Any
 import pandas as pd
 
 from ..config import get_config
+from ..evaluate import experiment_dir
 from ..io import LABEL_COL, load_train
 from ..logging_utils import get_logger
-from ..paths import models_dir, submission_dir
+from ..paths import submission_dir
 from ..progress import heartbeat
 from ..tasks import task
 from .main_template import render_main
@@ -39,7 +40,9 @@ log = get_logger("submission.build")
 def _collect_boosters(experiment: str) -> list[Any]:
     import lightgbm as lgb
 
-    mdir = models_dir() / experiment.replace(".", "_")
+    # Deliberately the FULL-data directory (subsample=None). A submission must never be
+    # built from a subsampled smoke model — see evaluate.experiment_dir.
+    mdir = experiment_dir(experiment, None)
     files = sorted(mdir.glob("fold*.txt"))
     if not files:
         raise FileNotFoundError(
@@ -49,7 +52,7 @@ def _collect_boosters(experiment: str) -> list[Any]:
 
 
 def _feature_cols(experiment: str) -> list[str]:
-    imp = models_dir() / experiment.replace(".", "_") / "importance.parquet"
+    imp = experiment_dir(experiment, None) / "importance.parquet"
     if not imp.is_file():
         raise FileNotFoundError(f"{imp} missing — run the model task first")
     # importance.parquet lists every training feature, in the training order
@@ -102,7 +105,7 @@ def build(
     boosters = _collect_boosters(experiment)
     feature_cols = _feature_cols(experiment)
     calibrator = None
-    cal_path = models_dir() / experiment.replace(".", "_") / "calibrator.joblib"
+    cal_path = experiment_dir(experiment, None) / "calibrator.joblib"
     if cal_path.is_file():
         calibrator = joblib.load(cal_path)
 

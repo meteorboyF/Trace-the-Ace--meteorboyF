@@ -61,8 +61,10 @@ def prior(force: bool = False, subsample: int | None = None) -> dict[str, Any]:
         va = df["fold"] == k
         df.loc[va, "pred"] = float(df.loc[tr, LABEL_COL].mean())
 
-    save_oof("baseline.prior", df[["response_id", "session_id", LABEL_COL, "pred"]])
-    res = score_frame(df, "baseline.prior")
+    save_oof(
+        "baseline.prior", df[["response_id", "session_id", LABEL_COL, "pred"]], subsample=subsample
+    )
+    res = score_frame(df, "baseline.prior", subsample=subsample)
     log.info("baseline.prior: logloss=%.5f (floor)", res["logloss"])
     return res
 
@@ -103,8 +105,9 @@ def lo_only(
     save_oof(
         "baseline.lo_only",
         df[["response_id", "session_id", LABEL_COL, "pred"]],
+        subsample=subsample,
     )
-    res = score_frame(df, "baseline.lo_only")
+    res = score_frame(df, "baseline.lo_only", subsample=subsample)
     res["smoothing"] = smoothing
     log.info("baseline.lo_only: logloss=%.5f  <-- THE BAR", res["logloss"])
     return res

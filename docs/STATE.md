@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-07-25 · **git SHA:** _(initial commit — see `git log -1`)_
 **Competition deadline:** model submissions 2026-08-27 23:59 UTC · write-up 2026-09-15
-**Entry:** solo · **Units remaining: 733.00 / 733** (nothing has run on a paid runtime yet)
+**Entry:** solo · **Units remaining: 733.00 / 733** (everything so far ran on CPU, 0 units)
 
 > New session? Read [`../CLAUDE.md`](../CLAUDE.md) → [`BRIEF.md`](BRIEF.md) → this file.
 > Then [`DATA.md`](DATA.md) for measured facts and [`RUNBOOK.md`](RUNBOOK.md) for recipes.
@@ -20,7 +20,8 @@ Everything so far has run on **CPU for zero units**.
 |---|---|---|---|
 | `baseline.prior` | 0.60876 | 0.500 | +0.0569 |
 | `baseline.lo_only` (the bar) | 0.55184 | 0.707 | — |
-| **`model.gbdt` (current best)** | **0.54401** | **0.7208** | **−0.00783 ✅ beats the bar** |
+| `model.gbdt` (4 blocks) | 0.54306 | 0.7223 | −0.00878 |
+| **`model.gbdt` + Platt (current best)** | **0.543005** | **0.7223** | **−0.00883 ✅ beats the bar** |
 
 5-fold session-grouped CV on all 35,072 responses. Full table: [`EXPERIMENTS.md`](EXPERIMENTS.md).
 **No leaderboard submission has been made** — LB score unknown.
@@ -30,43 +31,49 @@ Everything so far has run on **CPU for zero units**.
 - **Data**: ingest normalizes suffixed filenames by content shape; 22,821 transcripts
   consolidated. Measured facts in [`DATA.md`](DATA.md).
 - **CV**: session-grouped folds built once and persisted; leakage test green in CI.
-- **Features**: 4 blocks, 127 features, all cached at full scale to `data/features/`.
+- **Features**: 5 blocks built (4 in the default stack), **149 features**, all cached at
+  full scale. Includes the new `feedback` block (tutor corrective feedback, +0.00046).
 - **Model**: LightGBM, 5 folds, OOF persisted, cross-fold importance with dispersion.
-- **Research artifacts**: 16 figures (PNG+PDF) in `artifacts/figures/`; ablation done;
-  [`FINDINGS.md`](FINDINGS.md) has 6 key findings + 4 negative results.
+- **Research artifacts**: figures (PNG+PDF) in `artifacts/figures/`; 5-block ablation done;
+  [`FINDINGS.md`](FINDINGS.md) has 7 key findings + 6 negative results (incl. two retractions
+  of our own earlier conclusions).
+- **Semantic LO-alignment**: `features.window_embeddings` (BAAI/bge-small-en-v1.5, MIT) and
+  `lo_alignment(backend="embedding")` implemented and **validated end-to-end on CPU**.
 - **Submission**: 1.29 MB zip, `main.py` at root, **all 16 verify checks pass**, smoke run
   4.3 s → **0.126 h projected** for the full test set (cap 6 h).
 - **Quality gates**: ruff clean · mypy clean (39 files) · 41 tests pass · `selftest.all`
   green in 15.5 s.
 
 ## Known problems / open risks
-1. **The margin over the baseline is thin** (−0.0078). Most of the model's power is the
-   topic prior, not the transcript. Improving the *transcript* contribution is the main
+1. **The margin over the baseline is still thin** (−0.0088). Most of the model's power is the
+   topic prior, not the transcript. Improving the *transcript* contribution remains the main
    modeling task — and the main research story.
-2. **Structural features contribute nothing** (ablation: −0.00004). Candidate for removal;
-   kept for now because they are cheap and interpretable. See [`FINDINGS.md`](FINDINGS.md) N1.
-3. **Calibration does not help** (raw beats Platt and isotonic). Re-check after any model
-   change rather than assuming. See N2.
-4. **Embeddings not yet extracted** — the L4 path is written and cached-by-design but has
-   never run. This is the largest untested code path.
+2. **The blocks are largely substitutes, not complements.** LO-alignment alone (0.54921) and
+   structural alone (0.54878) score nearly the same. This caps what any one new block adds
+   and is the strongest argument for the semantic-alignment upgrade (next action 1).
+3. **Temporal block is excluded** — measured contribution −0.00049 (it hurts). Kept
+   registered so the negative result stays reportable. See [`FINDINGS.md`](FINDINGS.md) N1.
+4. **Semantic LO-alignment is built but not run at scale.** `features.window_embeddings`
+   is validated end-to-end on CPU (40 sessions) but the full extraction needs an L4;
+   projected **35–52 min ≈ 3–4 units**. This is the single highest-value pending experiment.
 5. **`annotate.moves` has only run with the `heuristic` backend.** The vLLM backend is
    written but unexercised.
-6. Local env is **CPU-only by design** (ADR-005) — torch/transformers are not installed
-   locally, so GPU code paths cannot be smoke-tested here.
+6. Local env now has **torch (CPU) + sentence-transformers** installed so GPU code paths can
+   be validated before spending units — a deliberate relaxation of ADR-005.
 7. Git SHAs in early run manifests read `unknown` (they predate the first commit).
 
 ## Next actions, in order
-1. **Push to GitHub** and confirm CI goes green.
-2. **Colab CPU session**: re-run `data.*` → `features.*` → `model.gbdt` to confirm parity
-   with local results (~0 units).
-3. **Improve the transcript signal** — this is where both the score and the paper live:
-   - LO-alignment currently uses TF-IDF; try the embedding backend for window relevance.
-   - Add move-distribution features from `model.move_classifier` into the design matrix.
-   - Tune LightGBM (current params are sensible defaults, untuned).
-4. **L4 session (~5 units)**: `features.embeddings`, smoke at `subsample=500` first.
-   Cached forever afterwards.
-5. **First real submission** once step 3 shows a clear gain. Budget: 3/week, ~15 left.
-6. **A100 timing validation (~4 units)** only immediately before a real submission.
+1. **L4 session — semantic LO-alignment (~3–4 units).** THE highest-value experiment.
+   `run("features.window_embeddings", subsample=500)` to smoke, then the full run, then
+   `run("features.lo_alignment", backend="embedding", force=True)` and re-run `model.gbdt`.
+   Lexical matching is the current ceiling: objectives and dialogue rarely share literal
+   wording. Projected 35–52 min on L4 (measured from CPU throughput).
+2. **Move taxonomy**: `annotate.moves` with the vLLM backend seeded by the feedback
+   categories, then `model.move_classifier`, then add move-distribution features.
+3. **First real submission** once step 1 lands. Budget: 3/week, ~15 attempts left.
+4. **A100 timing validation (~4 units)** only immediately before a real submission.
+5. Tuning is **not** a next action — a capacity sweep showed the current config is already
+   at the plateau (FINDINGS N5).
 
 ## Compute budget
 733 units, **0.00 spent**. Plan (ADR-008): ~0 CPU ladder · ~5 embeddings · ~40 LLM

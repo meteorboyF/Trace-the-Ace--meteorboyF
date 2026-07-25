@@ -22,11 +22,11 @@ import numpy as np
 import pandas as pd
 
 from ..cv import load_folds
-from ..evaluate import save_oof, score_frame
+from ..evaluate import experiment_dir, save_oof, score_frame
 from ..features.assemble import DEFAULT_BLOCKS, build_matrix, summarize
 from ..io import LABEL_COL, load_train_features, write_parquet
 from ..logging_utils import get_logger
-from ..paths import models_dir, runs_dir
+from ..paths import runs_dir
 from ..progress import heartbeat, pbar
 from ..tasks import task
 
@@ -196,7 +196,7 @@ def train(
         importances.append(
             pd.Series(booster.feature_importance("gain"), index=feat_cols, dtype=float)
         )
-        mdir = models_dir() / experiment.replace(".", "_")
+        mdir = experiment_dir(experiment, subsample)
         mdir.mkdir(parents=True, exist_ok=True)
         booster.save_model(str(mdir / f"fold{k}.txt"), num_iteration=booster.best_iteration)
 
@@ -206,7 +206,7 @@ def train(
     for c in ("struct_n_utterances", "struct_student_talk_ratio"):
         if c in frame.columns:
             oof_cols.append(c)
-    save_oof(experiment, frame[oof_cols])
+    save_oof(experiment, frame[oof_cols], subsample=subsample)
 
     # cross-fold importance with dispersion (for interpret.report)
     imp = pd.concat(importances, axis=1)
@@ -220,10 +220,10 @@ def train(
             "gain_max": imp.max(axis=1).to_numpy(),
         }
     ).sort_values("gain_mean", ascending=False)
-    imp_path = models_dir() / experiment.replace(".", "_") / "importance.parquet"
+    imp_path = experiment_dir(experiment, subsample) / "importance.parquet"
     write_parquet(imp_summary, imp_path)
 
-    res = score_frame(frame, experiment)
+    res = score_frame(frame, experiment, subsample=subsample)
     res.update(
         {
             "blocks": blocks,

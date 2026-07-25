@@ -245,12 +245,16 @@ def build(
 
     Unlike the other blocks this is keyed by ``response_id``, because its whole purpose
     is to differ between responses that share a session.
+
+    ``backend="lexical"`` scores window relevance with TF-IDF cosine (CPU, zero units).
+    ``backend="embedding"`` uses cached dense vectors from ``features.window_embeddings``
+    — semantically far stronger, because tutoring dialogue rarely repeats the objective's
+    literal wording.
     """
+    if backend == "embedding":
+        return _build_embedding(force=force, subsample=subsample, topk=topk)
     if backend != "lexical":
-        raise NotImplementedError(
-            f"backend={backend!r} not available yet; the embedding backend requires "
-            "features.embeddings to have been extracted on L4. Use backend='lexical'."
-        )
+        raise ValueError(f"unknown backend {backend!r}; use 'lexical' or 'embedding'")
     stage_local()
     path = block_cache_path("lo_alignment", f"{VERSION}_{backend}", subsample)
     vec = fit_lo_vectorizer()
@@ -299,3 +303,136 @@ def build(
         "n_features": int(out.shape[1] - 2),
         "backend": backend,
     }
+
+
+# ---------------------------------------------------------------------------
+# Semantic (embedding) backend
+# ---------------------------------------------------------------------------
+def _build_embedding(
+    force: bool = False, subsample: int | None = None, topk: int = TOPK
+) -> dict[str, Any]:
+    """LO-alignment scored by dense cosine instead of lexical overlap.
+
+    Reads the cached window vectors from ``features.window_embeddings`` (extracted once
+    on GPU) and the learning-objective vectors, then computes exactly the same feature
+    set as the lexical backend so the two are directly comparable in an ablation — the
+    only thing that changes is *how relevance is measured*.
+    """
+    from ..config import get_config
+    from .window_embeddings import DEFAULT_MODEL, lo_embedding_path
+    from .window_embeddings import VERSION as WE_VERSION
+
+    cfg = get_config()
+    model_name = str(cfg.get("embeddings", "alignment_model", default=DEFAULT_MODEL))
+    tag = f"{model_name.split('/')[-1]}_{WE_VERSION}"
+    win_path = block_cache_path("window_embeddings", tag, subsample)
+    lo_path = lo_embedding_path(tag if subsample is None else f"{tag}_sub{subsample}")
+
+    if not win_path.is_file() or not lo_path.is_file():
+        raise FileNotFoundError(
+            f"window embeddings missing ({win_path.name} / {lo_path.name}). Run "
+            "tasks.run('features.window_embeddings') on an L4 first "
+            "(smoke with subsample=500)."
+        )
+
+    path = block_cache_path("lo_alignment", f"{VERSION}_embedding", subsample)
+
+    def compute() -> pd.DataFrame:
+        stage_local()
+        win = pd.read_parquet(win_path)
+        lo = pd.read_parquet(lo_path)
+        edim = [c for c in win.columns if c.startswith("e")]
+
+        lo_vecs = {
+            str(r["learning_objective_id"]): np.asarray([r[c] for c in edim], dtype=np.float32)
+            for _, r in lo.iterrows()
+        }
+        # group window vectors by session once
+        win_sorted = win.sort_values(["session_id", "window_idx"])
+        win_groups = {
+            sid: (g[edim].to_numpy(dtype=np.float32), g["centre_pos"].to_numpy(dtype=float))
+            for sid, g in win_sorted.groupby("session_id")
+        }
+
+        feats = load_train_features()
+        if subsample is not None:
+            feats = feats[feats["session_id"].isin(win_groups.keys())]
+
+        tdir = transcripts_dir()
+        rows: list[dict[str, Any]] = []
+        for sid, grp in pbar(
+            list(feats.groupby("session_id")), desc="lo_alignment[embedding]", unit="session"
+        ):
+            if sid not in win_groups:
+                continue
+            W, pos = win_groups[sid]
+            # dialogue-window features still need the transcript itself
+            fp = tdir / f"{sid}.csv"
+            if not fp.is_file():
+                continue
+            try:
+                df = normalize_frame(pd.read_csv(fp, dtype=str))
+            except Exception:
+                continue
+            spans = _windows(df)
+            if len(spans) != len(W):  # window config changed since extraction
+                continue
+
+            for _, r in grp.iterrows():
+                v = lo_vecs.get(str(r["learning_objective_id"]))
+                if v is None:
+                    continue
+                # both sides are L2-normalized, so a dot product IS cosine similarity
+                sims = W @ v
+                f = _features_from_sims(sims, pos, df, spans, topk)
+                f["response_id"] = r["response_id"]
+                f["session_id"] = sid
+                rows.append(f)
+        return pd.DataFrame(rows)
+
+    out = load_or_compute(path, compute, force=force, label="features.lo_alignment[embedding]")
+    return {
+        "output_path": str(path),
+        "n_responses": int(len(out)),
+        "n_features": int(out.shape[1] - 2),
+        "backend": "embedding",
+        "model": model_name,
+    }
+
+
+def _features_from_sims(
+    sims: np.ndarray,
+    pos: np.ndarray,
+    df: pd.DataFrame,
+    spans: list[tuple[int, int]],
+    topk: int,
+) -> dict[str, float]:
+    """Identical feature set to the lexical backend, given precomputed similarities.
+
+    Keeping one feature definition for both backends is what makes the lexical-vs-semantic
+    ablation a clean comparison rather than a confounded one.
+    """
+    n_win = len(sims)
+    order = np.argsort(-sims)
+    top = order[: min(topk, n_win)]
+    best = int(order[0])
+
+    feats: dict[str, float] = {
+        f"{PREFIX}sim_max": float(sims[best]),
+        f"{PREFIX}sim_topk_mean": float(sims[top].mean()),
+        f"{PREFIX}sim_mean": float(sims.mean()),
+        f"{PREFIX}sim_std": float(sims.std()),
+        f"{PREFIX}sim_sum": float(sims.sum()),
+        f"{PREFIX}sim_frac_above_half_max": float(
+            np.mean(sims >= 0.5 * sims[best]) if sims[best] > 0 else 0.0
+        ),
+        f"{PREFIX}best_pos": float(pos[best]),
+        f"{PREFIX}topk_pos_mean": float(pos[top].mean()),
+        f"{PREFIX}topk_pos_spread": (
+            float(pos[top].max() - pos[top].min()) if len(top) > 1 else 0.0
+        ),
+        f"{PREFIX}n_windows": float(n_win),
+        f"{PREFIX}sim_gini": _gini(sims),
+    }
+    feats.update(_window_dialogue_features(df, spans, top))
+    return feats

@@ -459,3 +459,216 @@ def all_session_features(df: pd.DataFrame) -> dict[str, float]:
     feats.update(linguistic_features(df))
     feats.update(temporal_features(df))
     return feats
+
+
+# ---------------------------------------------------------------------------
+# Feedback block — tutor corrective feedback around student attempts.
+# ---------------------------------------------------------------------------
+# Hypothesis: mastery signal lives in how the tutor RESPONDS to student attempts.
+# A student who needs three attempts and two corrections before an affirmation has
+# probably not mastered the topic; one who is affirmed immediately probably has.
+#
+# Deliberately lexical and curated: an education researcher can read these lists and
+# audit exactly what the model keys on. The move classifier can supersede this later,
+# but a transparent version is worth having regardless (and is free on CPU).
+
+AFFIRM_MARKERS = [
+    "exactly",
+    "well done",
+    "that's right",
+    "thats right",
+    "correct",
+    "perfect",
+    "brilliant",
+    "excellent",
+    "spot on",
+    "good job",
+    "great job",
+    "nice work",
+    "well spotted",
+    "absolutely",
+    "you got it",
+    "that's it",
+    "thats it",
+    "lovely",
+    "fantastic",
+    "super",
+    "yes good",
+    "good boy",
+    "good girl",
+]
+CORRECTION_MARKERS = [
+    "not quite",
+    "not right",
+    "close",
+    "almost",
+    "nearly",
+    "try again",
+    "have another go",
+    "not exactly",
+    "that's wrong",
+    "thats wrong",
+    "incorrect",
+    "let's try",
+    "lets try",
+    "remember",
+    "careful",
+    "actually",
+    "hmm no",
+    "no,",
+    "not really",
+    "think again",
+    "look again",
+    "check that",
+    "not the",
+]
+REEXPLAIN_MARKERS = [
+    "so what we do",
+    "the way to",
+    "let me show",
+    "let me explain",
+    "we need to",
+    "the rule is",
+    "remember that",
+    "so first",
+    "step by step",
+    "what we're doing",
+    "the reason",
+    "because when",
+    "so if we",
+    "you have to",
+]
+
+
+def _marker_hits(text_lower: str, markers: list[str]) -> int:
+    return sum(text_lower.count(m) for m in markers)
+
+
+def _classify_tutor_turn(text: str) -> str:
+    """Coarse label for one tutor turn: affirm | correct | reexplain | other.
+
+    Order matters: correction is checked before affirmation because "close, but..."
+    and "almost right" contain affirmation-adjacent words while being corrective.
+    """
+    t = (text or "").lower()
+    n_corr = _marker_hits(t, CORRECTION_MARKERS)
+    n_aff = _marker_hits(t, AFFIRM_MARKERS)
+    if n_corr > n_aff:
+        return "correct"
+    if n_aff > 0:
+        return "affirm"
+    if _marker_hits(t, REEXPLAIN_MARKERS) > 0 or len(t) > 200:
+        return "reexplain"
+    return "other"
+
+
+def feedback_features(df: pd.DataFrame, prefix: str = "fb_") -> dict[str, float]:
+    """Corrective-feedback features over an (already scoped) stretch of dialogue.
+
+    Called twice: once over the whole session (``fbs_``) and once over the
+    LO-relevant windows (``fb_``), so the block is both a session descriptor and a
+    topic-conditioned one.
+    """
+    P = prefix
+    roles = df["role"].to_numpy()
+    texts = df["content"].astype(str).to_numpy()
+    n = len(df)
+
+    labels = [_classify_tutor_turn(t) if r == "tutor" else None for r, t in zip(roles, texts)]
+    n_aff = sum(1 for x in labels if x == "affirm")
+    n_corr = sum(1 for x in labels if x == "correct")
+    n_reex = sum(1 for x in labels if x == "reexplain")
+    n_tutor = int((roles == "tutor").sum())
+
+    feats: dict[str, float] = {
+        f"{P}n_affirm": float(n_aff),
+        f"{P}n_correct": float(n_corr),
+        f"{P}n_reexplain": float(n_reex),
+        f"{P}affirm_rate": safe_div(n_aff, n_tutor),
+        f"{P}correct_rate": safe_div(n_corr, n_tutor),
+        f"{P}reexplain_rate": safe_div(n_reex, n_tutor),
+        # THE headline ratio: how much of the feedback is corrective vs affirming?
+        f"{P}corrective_ratio": safe_div(n_corr, n_corr + n_aff, default=0.0),
+    }
+
+    # --- student attempts before an affirmation -----------------------------
+    # Walk the dialogue; count consecutive student turns preceding each tutor
+    # affirmation. A high value means the student needed several goes.
+    attempts_before_affirm: list[float] = []
+    run = 0
+    for r, lab in zip(roles, labels):
+        if r == "student":
+            run += 1
+        elif r == "tutor":
+            if lab == "affirm" and run > 0:
+                attempts_before_affirm.append(float(run))
+            if lab in ("affirm", "correct", "reexplain"):
+                run = 0
+    aba = np.array(attempts_before_affirm, dtype=float)
+    feats[f"{P}mean_attempts_before_affirm"] = float(aba.mean()) if aba.size else 0.0
+    feats[f"{P}max_attempts_before_affirm"] = float(aba.max()) if aba.size else 0.0
+    feats[f"{P}n_affirmed_episodes"] = float(aba.size)
+
+    # --- did the tutor re-explain right after a student attempt? ------------
+    reexplain_after_student = 0
+    correct_after_student = 0
+    affirm_after_student = 0
+    for i in range(1, n):
+        if roles[i] == "tutor" and roles[i - 1] == "student":
+            if labels[i] == "reexplain":
+                reexplain_after_student += 1
+            elif labels[i] == "correct":
+                correct_after_student += 1
+            elif labels[i] == "affirm":
+                affirm_after_student += 1
+    responded = reexplain_after_student + correct_after_student + affirm_after_student
+    feats[f"{P}reexplain_after_attempt_rate"] = safe_div(reexplain_after_student, responded)
+    feats[f"{P}correct_after_attempt_rate"] = safe_div(correct_after_student, responded)
+    feats[f"{P}affirm_after_attempt_rate"] = safe_div(affirm_after_student, responded)
+
+    # --- repair: did a correction eventually lead to an affirmation? --------
+    # Pedagogically the most interesting quantity here — successful repair is the
+    # signature of learning happening inside the lesson.
+    repairs, unrepaired = 0, 0
+    pending = False
+    for lab in labels:
+        if lab == "correct":
+            if pending:
+                unrepaired += 1
+            pending = True
+        elif lab == "affirm" and pending:
+            repairs += 1
+            pending = False
+    if pending:
+        unrepaired += 1
+    feats[f"{P}repair_rate"] = safe_div(repairs, repairs + unrepaired)
+    feats[f"{P}n_repairs"] = float(repairs)
+    feats[f"{P}n_unrepaired_corrections"] = float(unrepaired)
+
+    # --- where does the LAST correction sit? --------------------------------
+    # A correction near the end (unrepaired) is a much worse sign than one early on
+    # that was subsequently resolved.
+    last_corr = -1
+    last_aff = -1
+    for i, lab in enumerate(labels):
+        if lab == "correct":
+            last_corr = i
+        elif lab == "affirm":
+            last_aff = i
+    feats[f"{P}last_correction_pos"] = (
+        safe_div(last_corr, max(n - 1, 1)) if last_corr >= 0 else -1.0
+    )
+    feats[f"{P}last_affirm_pos"] = safe_div(last_aff, max(n - 1, 1)) if last_aff >= 0 else -1.0
+    # +1 => ended on an affirmation (good), -1 => ended on a correction (bad)
+    feats[f"{P}ends_on_affirm"] = float(np.sign(last_aff - last_corr)) if n else 0.0
+
+    # --- longest consecutive corrective streak ------------------------------
+    streak = best = 0
+    for lab in labels:
+        if lab == "correct":
+            streak += 1
+            best = max(best, streak)
+        elif lab in ("affirm", "reexplain"):
+            streak = 0
+    feats[f"{P}max_correction_streak"] = float(best)
+    return feats

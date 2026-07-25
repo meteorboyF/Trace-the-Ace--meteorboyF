@@ -38,7 +38,7 @@ from .evaluate import (
 )
 from .io import LABEL_COL
 from .logging_utils import get_logger
-from .paths import figures_dir, models_dir, runs_dir
+from .paths import figures_dir, runs_dir
 from .progress import pbar
 from .tasks import task
 from .viz import PALETTE, save_fig, setup_mpl
@@ -143,13 +143,13 @@ def report(
 ) -> dict[str, Any]:
     from .evaluate import baseline_logloss
 
-    oof = load_oof(experiment)
+    oof = load_oof(experiment, subsample=subsample)
     y = oof[LABEL_COL].to_numpy(dtype=float)
     p = oof["pred"].to_numpy(dtype=float)
     figures: list[str] = []
     res: dict[str, Any] = {"experiment": experiment}
 
-    base_ll = baseline_logloss()
+    base_ll = baseline_logloss(subsample=subsample)
     res["logloss"] = logloss(y, p)
     res["ece"] = expected_calibration_error(y, p)
     if base_ll is not None:
@@ -157,7 +157,9 @@ def report(
         res["delta_vs_lo_only"] = res["logloss"] - base_ll
 
     # 1. cross-fold feature importance
-    imp_path = models_dir() / experiment.replace(".", "_") / "importance.parquet"
+    from .evaluate import experiment_dir
+
+    imp_path = experiment_dir(experiment, subsample) / "importance.parquet"
     if imp_path.is_file():
         imp = pd.read_parquet(imp_path)
         figures += [
@@ -178,7 +180,7 @@ def report(
     mp_, fp_, _ = reliability_curve(y, p)
     curves["raw"] = (mp_, fp_)
     try:
-        cal = load_oof(f"{experiment}.calibrated")
+        cal = load_oof(f"{experiment}.calibrated", subsample=subsample)
         cmp_, cfp_, _ = reliability_curve(cal[LABEL_COL].to_numpy(), cal["pred"].to_numpy())
         curves["calibrated"] = (cmp_, cfp_)
         res["calibrated_logloss"] = logloss(cal[LABEL_COL].to_numpy(), cal["pred"].to_numpy())
@@ -265,10 +267,12 @@ def ablation(
     A block whose removal barely changes log loss did not matter — that is a publishable
     negative result and is logged as such.
     """
-    from .features.assemble import DEFAULT_BLOCKS
+    from .features.assemble import ALL_BLOCKS
     from .models.gbdt import train as gbdt_train
 
-    blocks = list(blocks or DEFAULT_BLOCKS)
+    # sweep ALL blocks (incl. ones excluded from the default stack) so the
+    # negative results stay visible rather than disappearing from the report.
+    blocks = list(blocks or ALL_BLOCKS)
     results: dict[str, float] = {}
 
     full = gbdt_train(

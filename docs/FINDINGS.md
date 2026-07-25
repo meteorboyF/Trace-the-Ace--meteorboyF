@@ -125,7 +125,8 @@ the transcript rather than in competition with it.
 | `baseline.prior` (global base rate) | 0.60876 | 0.500 | +0.0569 |
 | `baseline.lo_only` (topic only, **no transcript**) | **0.55184** | 0.707 | — (the bar) |
 | GBDT, **transcript features only** | 0.59312 | 0.609 | **+0.0413 (worse)** |
-| GBDT, transcript **+ topic prior** | **0.54401** | **0.721** | **−0.0078 (better)** |
+| GBDT, transcript + topic prior (4 blocks) | 0.54306 | 0.7223 | −0.00878 |
+| **+ Platt calibration (current best)** | **0.543005** | **0.7223** | **−0.00883 (better)** |
 
 `[runs/gbdt/model_gbdt.json]`, `[runs/evaluate/model_gbdt.json]`, `[docs/EXPERIMENTS.md]`
 
@@ -177,19 +178,61 @@ removal hurts most. Reporting importance alone would have produced a wrong concl
 
 | Block | Gain importance | Marginal contribution | Rank agreement |
 |---|---|---|---|
-| LO-alignment | **52,445** (1st) | +0.00084 (2nd) | ✗ |
-| Linguistic | 28,022 (2nd) | **+0.00196 (1st)** | ✗ |
-| Structural | 13,248 (3rd) | **−0.00004 (4th)** | ✗ |
-| Temporal | 5,688 (4th) | +0.00056 (3rd) | ✗ |
+| LO-alignment | **51,822** (1st) | +0.00059 (2nd) | ✗ |
+| Linguistic | 27,822 (2nd) | **+0.00192 (1st)** | ✗ |
+| Structural | 13,721 (3rd) | +0.00028 (4th) | ✗ |
+| Feedback | 11,270 (4th) | +0.00046 (3rd) | ✗ |
+| Temporal | (excluded) | **−0.00049 (harmful)** | — |
 
 `[runs/interpret/ablation.json]`, `[artifacts/figures/importance_model_gbdt.pdf]`
 
 **Why it matters for practice.** Gain importance measures how often a model *used* a feature,
 which under correlated features rewards whichever correlated variant the tree happened to
 split on first. Marginal contribution measures what is *lost* without it. Because our blocks
-are heavily correlated (talk ratio appears in structural, linguistic, and inside the
-LO-relevant windows), the two diverge sharply. **We recommend education-research work report
-ablations, not importance charts**, when the claim is "feature family X matters."
+are heavily correlated (talk ratio appears in structural, linguistic, feedback, and inside
+the LO-relevant windows), the two rankings disagree at **every single position**. **We
+recommend education-research work report ablations, not importance charts**, when the claim
+is "feature family X matters."
+
+A sharper demonstration of the same redundancy: LO-alignment alone (0.54921) and structural
+alone (0.54878) score almost identically when each is paired with the topic prior, even
+though LO-alignment absorbs ~4× the gain when both are present. The blocks are largely
+**substitutes**, not complements — which caps how much any single new block can add.
+
+---
+
+### F7. Tutor feedback behaviour carries independent signal
+
+**Claim.** How a tutor *responds* to student attempts — correcting versus affirming, and
+whether a correction is eventually resolved — predicts outcomes beyond what the rest of the
+dialogue features capture.
+
+**Evidence.** A dedicated feedback block (40 features, lexical markers, CPU-only) contributes
+**+0.00046** log loss on leave-one-out and takes **10.8% of total model gain**, with all 40
+features used. It is complementary rather than redundant with LO-alignment: the two together
+(0.54759) beat either alone (0.54921 lo-alignment, 0.55055 feedback).
+`[runs/interpret/ablation.json]`, `[src/traceace/features/feedback.py]`
+
+The highest-gain feedback features are exactly the interpretable ones:
+
+| Feature | What it measures | Gain |
+|---|---|---|
+| `fbs_corrective_ratio` | corrections ÷ (corrections + affirmations) | 891 |
+| `fbs_affirm_rate` | affirmations per tutor turn | 878 |
+| `fb_affirm_rate` | same, **within the topic-relevant window** | 783 |
+| `fbs_affirm_after_attempt_rate` | tutor affirms immediately after a student attempt | 628 |
+| `fbs_correct_after_attempt_rate` | tutor corrects immediately after a student attempt | 565 |
+| `fbs_last_correction_pos` | where the final correction falls in the lesson | 507 |
+
+**Why it matters for practice.** These are quantities a tutoring platform can compute without
+any ML: the ratio of corrective to affirming feedback, and whether the lesson *ends* on an
+affirmation or an unresolved correction. They describe the interaction rather than the
+student, so they are directly actionable as tutor feedback — and unlike topic difficulty they
+cannot be known before the lesson happens.
+
+**Caveat (important).** This is correlational. Tutors correct *because* a student is
+struggling, so a high corrective ratio is plausibly a **response to** low mastery rather than
+a cause of it. Nothing here licenses telling tutors to correct less.
 
 ---
 
@@ -330,25 +373,31 @@ the computational cost, and keeps the generative model entirely out of the predi
 *Failed approaches are findings. Reporting them is what the Rigor criterion rewards, and each
 of these would otherwise cost another group the same wasted effort.*
 
-### N1. Structural dialogue features contribute nothing once language is modelled
-Turn counts, talk ratio, role balance and monologue run lengths — the metrics tutoring
-platforms most commonly report — have a marginal contribution of **−0.00004 log loss**.
-Removing the entire block leaves the model *fractionally better*. They are not useless in
-isolation (they rank 3rd by gain importance), but every bit of signal they carry is already
-present in the linguistic and LO-alignment blocks.
-**Implication:** "student talk ratio" as a standalone quality metric is largely redundant
-with *what* is actually said. `[runs/interpret/ablation.json]`
+### N1. Timing features carry no outcome signal — and actively hurt
+The temporal block (18 features: inter-utterance gaps, student response latency, pacing
+drift, all with robust statistics) has a marginal contribution of **−0.00049** — removing it
+makes the model *better* (0.54355 → 0.54306). It is excluded from the default stack.
 
-### N2. Calibration did not improve log loss
-Both Platt scaling (0.54407) and isotonic regression (0.54647) were **worse** than the raw
-LightGBM output (0.54401); the winner was "no calibration". Expected calibration error was
-already **0.0054**, and the mean predicted probability (0.7031) matches the observed base rate
-(0.7025) almost exactly.
-**Implication:** the organizers correctly note that log loss "can often be improved with
-calibration" — but a properly cross-validated gradient-boosted model trained *directly* on log
-loss is already well calibrated, and post-hoc calibration then only adds variance. Worth
-*checking*, not worth assuming. Our comparison uses an inner cross-fold loop, so this is not
-an artifact of evaluating the calibrator on its own fitting data.
+We consider this a genuine finding rather than an implementation failure, because the
+features are well-formed: `temp_gap_trimmean` has 19,987 distinct values with sensible
+spread (median 7.2 s, IQR 11 s), and sessions cluster tightly at ~43 minutes so pacing is
+comparable across lessons. Two plausible explanations: (a) ASR segmentation timestamps
+reflect the *transcription pipeline's* chunking as much as real conversational timing, and
+(b) whatever pedagogical signal timing carries is already captured by utterance-length and
+turn-taking features.
+**Implication for other groups:** response latency is an appealing "struggle" proxy and is
+cheap to compute, but on ASR-derived transcripts it did not survive contact with an ablation.
+Verify it on your own data before building on it. `[runs/interpret/ablation.json]`
+
+### N2. Calibration gains are real but negligible here
+Platt scaling improves log loss by **+0.000058** (0.543063 → 0.543005) and roughly halves
+expected calibration error (0.0056 → 0.0033). Isotonic regression is clearly *worse*
+(0.545318) despite the best ECE (0.0024) — it over-fits the bin edges.
+**Implication:** the organizers correctly note log loss "can often be improved with
+calibration", but a cross-validated GBDT trained *directly* on log loss is already
+near-calibrated, so the headroom is ~0.0001, not ~0.01. Worth checking (it is free), not
+worth engineering around. Our comparison uses an inner cross-fold loop, so the gain is not an
+artifact of fitting and evaluating the calibrator on the same rows.
 `[runs/calibration/model_gbdt.json]`
 
 ### N3. A transcript-only model loses to a topic-difficulty lookup table
@@ -356,11 +405,41 @@ Detailed in [F4](#f4-the-transcript-adds-real-but-modest-signal-on-top-of-topic-
 0.59312 vs 0.55184. Recorded here because it is the result most likely to be quietly dropped
 from a write-up, and it is the one that most changes how the field should report results.
 
-### N4. An earlier variance estimate was wrong, and we corrected it
-Our first within-session variance ratio (0.433) averaged over multi-response sessions only,
-overstating the global quantity; the response-weighted value is **0.260**. Recorded in F1 with
-the reasoning, and the calculation is now a reproducible task (`eda.lo_conditioning`) rather
-than an ad-hoc script.
+### N4. Two of our own earlier conclusions were wrong — retracted here
+Rigor means recording our own errors, not only the model's.
+
+1. **Within-session variance.** First estimate 0.433 averaged over multi-response sessions
+   only; the response-weighted global value is **0.260** (F1). Now computed reproducibly by
+   `eda.lo_conditioning`.
+2. **"Disfluency and structural features are dead."** An earlier diagnostic reported 94 of
+   127 features with exactly zero split gain, and we nearly concluded that disfluency
+   markers carry no signal. That diagnostic was run against a **corrupted model**: an OOF
+   file-naming bug (N6) had left the run early-stopping after 26–30 iterations, so almost
+   nothing got split on. On the correctly-trained model only **5 of 149** features are
+   unused, and disfluency features take **6.2% of total gain** with 13 of 16 used —
+   `ling_tutor_filler_rate` (914) and `ling_student_filler_rate` (858) are top-20 features.
+   **The disfluency hypothesis is supported, not refuted.** The lesson: never read feature
+   importance without first checking the model actually converged.
+
+### N5. Model capacity is not the bottleneck
+Sweeping LightGBM capacity made things uniformly worse: deeper trees (127 leaves,
+`min_data_in_leaf=20`) gave 0.54657, deeper + slower (lr 0.01) 0.54515, no feature
+subsampling 0.54426 — versus 0.54306 for the tuned-by-default configuration. The plateau is a
+**signal ceiling, not an optimization failure**, which is why effort has gone into new feature
+families rather than hyperparameters.
+
+### N6. An OOF file-naming bug silently inverted the headline result
+`save_oof()` keyed files by experiment name alone, so a 400-session self-test overwrote the
+full-data `baseline.lo_only` OOF. Every subsequent `delta_vs_lo_only` was then computed
+against a 400-session baseline (0.53881) instead of the real one (0.55184) — flipping the
+headline from "beats the bar by 0.0078" to "loses by 0.0052" **with no error raised
+anywhere**, because both files were valid parquet with the right schema.
+Fixed by namespacing OOF paths on subsample size, guarded by a row-count mismatch check that
+logs loudly, and pinned by two regression tests.
+**Implication for other groups:** in a pipeline where smoke tests and real runs share an
+artifact directory, make the artifact *key* include the data scope. A silent comparison
+against the wrong baseline is far more dangerous than a crash.
+`[src/traceace/evaluate.py::experiment_name]`, `[tests/test_guards.py]`
 
 ---
 

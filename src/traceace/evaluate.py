@@ -23,7 +23,7 @@ from sklearn.metrics import log_loss, roc_auc_score
 from .config import get_config
 from .io import LABEL_COL, write_parquet
 from .logging_utils import get_logger
-from .paths import oof_dir, runs_dir
+from .paths import models_dir, oof_dir, runs_dir
 from .tasks import task
 
 log = get_logger("evaluate")
@@ -51,26 +51,55 @@ def auc(y: np.ndarray, p: np.ndarray) -> float:
 
 
 # --- OOF persistence ---------------------------------------------------------
+def experiment_name(base: str, subsample: int | None) -> str:
+    """Namespace an experiment by subsample size.
+
+    **This exists because of a real bug.** OOF frames were originally keyed by experiment
+    name alone, so a 400-session ``selftest`` run silently overwrote the full-data
+    ``baseline.lo_only`` OOF. Every subsequent ``delta_vs_lo_only`` was then measured
+    against a subsampled baseline — the headline number flipped sign (-0.0078 -> +0.0052)
+    with no error raised anywhere. Subsampled results must never share a key with
+    full-data results.
+    """
+    return base if subsample is None else f"{base}__sub{subsample}"
+
+
 def oof_path(experiment: str) -> Path:
     return oof_dir() / f"{experiment.replace('.', '_')}.parquet"
 
 
-def save_oof(experiment: str, df: pd.DataFrame) -> Path:
-    """Persist OOF predictions. Required for calibration and blending (§10.2)."""
+def experiment_dir(experiment: str, subsample: int | None = None) -> Path:
+    """Directory for an experiment's model artifacts, namespaced by subsample.
+
+    Same reasoning as :func:`experiment_name`, but the stakes are higher: ``submission.build``
+    reads the fold models from here, so an unnamespaced path let a 400-session self-test
+    overwrite the full-data models and would have shipped a submission trained on 1.7% of the
+    data — silently, since the files are valid LightGBM boosters either way.
+    """
+    return models_dir() / experiment_name(experiment, subsample).replace(".", "_")
+
+
+def save_oof(experiment: str, df: pd.DataFrame, subsample: int | None = None) -> Path:
+    """Persist OOF predictions. Required for calibration and blending (§10.2).
+
+    Pass ``subsample`` so a smoke run cannot overwrite a full-data experiment.
+    """
     required = {"response_id", LABEL_COL, "pred"}
     missing = required - set(df.columns)
     if missing:
         raise KeyError(f"OOF frame for {experiment!r} missing columns {missing}")
-    path = oof_path(experiment)
+    name = experiment_name(experiment, subsample)
+    path = oof_path(name)
     write_parquet(df[sorted(df.columns)], path)
-    log.info("saved OOF for %s -> %s (%d rows)", experiment, path, len(df))
+    log.info("saved OOF for %s -> %s (%d rows)", name, path, len(df))
     return path
 
 
-def load_oof(experiment: str) -> pd.DataFrame:
-    path = oof_path(experiment)
+def load_oof(experiment: str, subsample: int | None = None) -> pd.DataFrame:
+    name = experiment_name(experiment, subsample)
+    path = oof_path(name)
     if not path.is_file():
-        raise FileNotFoundError(f"no OOF for {experiment!r} at {path} — run that task first")
+        raise FileNotFoundError(f"no OOF for {name!r} at {path} — run that task first")
     return pd.read_parquet(path)
 
 
@@ -79,16 +108,23 @@ def list_oof() -> list[str]:
 
 
 # --- scoring -----------------------------------------------------------------
-def baseline_logloss() -> float | None:
-    """OOF log loss of ``baseline.lo_only``, or None if it has not been run."""
+def baseline_logloss(subsample: int | None = None) -> float | None:
+    """OOF log loss of ``baseline.lo_only`` at the SAME subsample size.
+
+    Comparing a subsampled model against a full-data baseline (or vice versa) is
+    meaningless — different row sets, different achievable loss. Always compare
+    like-for-like.
+    """
     try:
-        b = load_oof(BASELINE_KEY)
+        b = load_oof(BASELINE_KEY, subsample=subsample)
     except FileNotFoundError:
         return None
     return logloss(b[LABEL_COL].to_numpy(), b["pred"].to_numpy())
 
 
-def score_frame(df: pd.DataFrame, experiment: str = "") -> dict[str, Any]:
+def score_frame(
+    df: pd.DataFrame, experiment: str = "", subsample: int | None = None
+) -> dict[str, Any]:
     """Score an OOF frame: log loss (headline), AUC, and delta vs baseline.lo_only."""
     y = df[LABEL_COL].to_numpy()
     p = df["pred"].to_numpy()
@@ -99,13 +135,27 @@ def score_frame(df: pd.DataFrame, experiment: str = "") -> dict[str, Any]:
         "auc": auc(y, p),
         "n": int(len(df)),
         "pos_rate": float(np.mean(y)),
+        "subsample": subsample,
     }
-    base = baseline_logloss()
+    base = baseline_logloss(subsample=subsample)
     if base is not None:
         # negative delta = better than the LO-only bar (lower log loss is better)
         out["baseline_lo_only_logloss"] = base
         out["delta_vs_lo_only"] = ll - base
         out["beats_lo_only"] = bool(ll < base)
+        # Guard against the row-count mismatch that made this bug invisible.
+        try:
+            nb = len(load_oof(BASELINE_KEY, subsample=subsample))
+            if nb != len(df):
+                out["WARNING_baseline_row_mismatch"] = f"model n={len(df)} vs baseline n={nb}"
+                log.error(
+                    "delta_vs_lo_only compares %d model rows against %d baseline rows — "
+                    "these are NOT comparable. Re-run baseline.lo_only at this subsample.",
+                    len(df),
+                    nb,
+                )
+        except FileNotFoundError:
+            pass
     return out
 
 
@@ -185,8 +235,8 @@ def report(
     subsample: int | None = None,
 ) -> dict[str, Any]:
     """Score a persisted OOF experiment and write a JSON report."""
-    df = load_oof(experiment)
-    res = score_frame(df, experiment)
+    df = load_oof(experiment, subsample=subsample)
+    res = score_frame(df, experiment, subsample=subsample)
     res["ece"] = expected_calibration_error(df[LABEL_COL].to_numpy(), df["pred"].to_numpy())
 
     # slices, where the necessary columns are available on the OOF frame

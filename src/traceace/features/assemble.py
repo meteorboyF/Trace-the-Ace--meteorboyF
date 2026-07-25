@@ -27,9 +27,17 @@ BLOCKS: dict[str, tuple[str, str, str]] = {
     "linguistic": ("linguistic", "v1", "session_id"),
     "temporal": ("temporal", "v1", "session_id"),
     "lo_alignment": ("lo_alignment", "v1_lexical", "response_id"),
+    "feedback": ("feedback", "v1", "response_id"),
 }
 
-DEFAULT_BLOCKS = ["structural", "linguistic", "temporal", "lo_alignment"]
+# NOTE: `temporal` is deliberately EXCLUDED from the default stack.
+# Measured leave-one-block-out contribution is **-0.00049** — removing it makes the model
+# *better* (0.54355 -> 0.54306). Every one of its 18 features also had exactly zero split
+# gain. The block is kept registered (and its task still runs) because the negative result
+# is worth reporting: ASR-derived timing carries no outcome signal here once language is
+# modelled. See docs/FINDINGS.md N5. Pass blocks=[..., "temporal"] to re-include it.
+DEFAULT_BLOCKS = ["structural", "linguistic", "lo_alignment", "feedback"]
+ALL_BLOCKS = ["structural", "linguistic", "temporal", "lo_alignment", "feedback"]
 
 # Columns that are identifiers/labels, never features.
 NON_FEATURE = {
@@ -88,6 +96,8 @@ def block_of(column: str) -> str:
         ("linguistic", "ling_"),
         ("temporal", "temp_"),
         ("lo_alignment", "lo_"),
+        ("feedback", "fb_"),
+        ("feedback", "fbs_"),
         ("embeddings", "emb_"),
     ):
         if column.startswith(prefix):
