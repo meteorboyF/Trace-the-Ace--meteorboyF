@@ -92,8 +92,42 @@ run("submission.verify", smoke=True)  # raises on any violation
 probability outside [0,1] or NaN · non-literal print/log (AST scan) · progress bars enabled ·
 network-capable imports · projected runtime > 4.5 h · zip > 55 GB · > 400 log lines.
 
-**Only three full submissions per week** (~15 attempts left). Smoke tests, cancelled and
-failed jobs do not count. Always: local `selftest.all` → smoke environment → full submission.
+**Only three full submissions per week** (~14 attempts left). Smoke tests, cancelled and
+failed jobs do not count.
+
+## Submitting for real — the exact sequence
+
+**Step 0 — local (already automated).**
+```bash
+.venv/bin/python -c "import traceace; traceace.configure(repo_dir='.', quiet=True); \
+    traceace.tasks.run('selftest.all')"
+```
+Builds, smoke-runs `main.py` as a subprocess, and runs all 18 verify checks. Must be green.
+The built artifact is `submission/submission.zip`.
+
+**Step 1 — the organizers' local harness.** They ask for this before submitting:
+```bash
+git clone https://github.com/drivendataorg/tutoring-outcomes-runtime
+cd tutoring-outcomes-runtime
+# place OUR zip where their harness expects it
+cp /home/meteorboyf/Datathons/TraceTheAce/submission/submission.zip submission/submission.zip
+# their harness needs a data/ dir shaped like the container; follow their README
+just test-submission
+```
+This runs our `main.py` inside their actual container image, which catches anything that
+depends on our local Python environment. If `just` is not installed: `sudo apt install just`
+or use the equivalent `make`/docker command from their README.
+
+**Step 2 — smoke environment on the platform.** Upload `submission.zip` and choose the
+**smoke** option. Smoke runs do **not** count against the 3/week limit. Must finish inside
+10 minutes; ours projects ~5 s for 100 rows.
+
+**Step 3 — full submission.** Only after the smoke run succeeds. This **does** consume one of
+the three weekly slots.
+
+**What to check on the leaderboard.** Our CV says 0.54339 (safe variant). If the LB score is
+far worse than that, suspect train/serve skew first — that is exactly what a real submission
+is for, and why submitting early is worth a slot even with a modest model.
 
 ## When a cell errors
 

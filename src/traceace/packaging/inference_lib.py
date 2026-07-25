@@ -916,3 +916,42 @@ def lo_position_features(
 
     feats[f"{P}gap_to_session_end_utt"] = safe_div(n - end, n)
     return feats
+
+
+# ---------------------------------------------------------------------------
+# Shared window selection — used identically by training and inference.
+# ---------------------------------------------------------------------------
+def topk_spans(
+    lo_text: str,
+    vectorizer: Any,
+    window_matrix: Any,
+    spans: list[tuple[int, int]],
+    topk: int = TOPK,
+) -> list[tuple[int, int]]:
+    """Top-k LO-relevant window spans, merged and in chronological order.
+
+    Order matters for the feedback and trajectory blocks, which walk the dialogue
+    sequentially looking for attempt -> correction -> affirmation episodes.
+    """
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    if not spans or window_matrix is None:
+        return []
+    sims = cosine_similarity(vectorizer.transform([lo_text or ""]), window_matrix).ravel()
+    top = np.argsort(-sims)[: min(topk, len(sims))]
+    chosen = sorted(spans[int(i)] for i in top)
+    merged: list[tuple[int, int]] = []
+    for s, e in chosen:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def frame_from_spans(df: pd.DataFrame, spans: list[tuple[int, int]]) -> pd.DataFrame:
+    """Concatenate the given spans of ``df`` in order."""
+    if not spans:
+        return df.iloc[0:0]
+    parts = [df.iloc[s:e] for s, e in spans]
+    return pd.concat(parts) if len(parts) > 1 else parts[0]

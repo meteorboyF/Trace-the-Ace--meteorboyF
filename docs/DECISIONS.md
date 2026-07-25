@@ -170,3 +170,51 @@ exhausted, and the measured baselines are strong.
 
 **Consequences.** The tier guard (`max_tier`) enforces this structurally by refusing CPU
 tasks on paid runtimes. `budget.report` tracks spend against the 733 balance.
+
+
+---
+
+## ADR-009 — 2026-07-26 — Ship without cross-row feature inputs pending a rules ruling
+
+**Context.** Four `lopos_*` features are computed by grouping rows of `test_features.csv`
+that share a `session_id`. `lopos_n_competing_los` is the **second-highest-gain feature in
+the model**. The rules preclude "using information gathered across multiple test samples as
+feature inputs", and the ambiguity is real: `session_id` is provided metadata and no fitting
+occurs on test data, but the feature's *value* depends on which other test rows exist.
+
+**Decision.** Default to **excluding** them (`features.allow_cross_row_aggregates: false`),
+behind a config flag so the decision is reversible in one line. A forum question is drafted
+(`docs/FORUM_QUESTION.md`). `submission.verify` fails the build if a cross-row feature
+reaches the shipped model while the flag is off.
+
+**Alternatives rejected.** (a) Ship with them and hope — the penalty is disqualification, not
+a worse score, and it would apply to *every* submission made under that assumption.
+(b) Delete the features entirely — discards a genuine research finding and cannot be undone
+cheaply if the ruling is favourable.
+
+**Consequences.** Measured cost **+0.00251 CV log loss** (0.54088 → 0.54339), about 22% of
+the transcript's total contribution and larger than the whole trajectory block. Accepted.
+The pacing finding remains valid on training data and stays in the paper regardless.
+
+---
+
+## ADR-010 — 2026-07-26 — Verify feature COVERAGE, not just output format
+
+**Context.** `submission.verify` passed 16/16 checks on a submission whose `main.py`
+produced 110 of the model's 185 expected features. The feedback, trajectory and LO-position
+blocks — including the single strongest block — were never wired into the inference path.
+The missing 40% arrived as NaN, which LightGBM accepts silently, so the output was correctly
+formatted, in range, and completely degraded. It would have consumed one of three weekly
+attempts and produced a mysteriously bad leaderboard score.
+
+**Decision.** `main.py` writes the **names** of the features it produced (names only — never
+values or aggregates, which would violate the logging rule), and
+`submission.verify::verify_feature_coverage` fails on any gap against the bundle's
+`feature_cols`. `main.py` now computes every block, and window selection is shared with
+training through `inference_lib.topk_spans` so the two cannot diverge.
+
+**Alternatives rejected.** Relying on the parity unit tests — they compared *implementations*
+of blocks that were wired in, and could not see a block that was simply absent from `main.py`.
+
+**Consequences.** Adding a feature block now requires wiring it into `main.py` or the build
+fails loudly. **Standing rule: format validity does not imply feature validity.**

@@ -52,6 +52,36 @@ implements exactly that anti-goal, and every report prints `delta_vs_lo_only`.
 Packages must already exist in their image; additions need a GitHub issue on the runtime
 repo. **Current status: no additions needed** — see [`EXTERNAL_ASSETS.md`](EXTERNAL_ASSETS.md).
 
+## ⚠️ OPEN RULES QUESTION — cross-row feature inputs (blocking)
+
+**Status: unresolved. Ship SAFE until answered.** See [`FORUM_QUESTION.md`](FORUM_QUESTION.md).
+
+The rules preclude "using information gathered across multiple test samples as feature
+inputs". Four features are derived by grouping rows of `test_features.csv` that share a
+`session_id`:
+
+| Feature | Derivation |
+|---|---|
+| `lopos_n_competing_los` | count of rows sharing this `session_id` |
+| `lopos_ordinal` / `lopos_ordinal_frac` | rank among the session's objectives |
+| `lopos_overlap_with_others` | window overlap with the session's other objectives |
+
+Ambiguity is genuine: `session_id` is *provided metadata*, no fitting occurs on test data,
+and model parameters are unaffected by test-set composition — but the *value* of these
+features does depend on which other rows exist, which is the plain reading of the
+prohibition.
+
+**Our position:** default `features.allow_cross_row_aggregates: false` in `conf/base.yaml`.
+`submission.verify::verify_no_cross_row_features` fails the build if one reaches the shipped
+model. **Measured cost of safety: +0.00251 CV log loss** (22% of the transcript's total
+contribution) — a real price, and still far cheaper than a disqualification.
+
+The associated *research* finding (objectives compete for a fixed lesson budget) is valid on
+**training** data regardless of the ruling, and stays in the paper either way.
+
+**Every other feature is independent by construction** — full audit in
+[`FORUM_QUESTION.md`](FORUM_QUESTION.md). Re-run that audit whenever a block is added.
+
 ## Disqualification risks — treat as hard constraints
 1. **Never print or log anything about the test data** — no excerpts, no learning-objective
    text, and no aggregates (counts, sums, means, token totals). `submission.verify`
@@ -61,6 +91,12 @@ repo. **Current status: no additions needed** — see [`EXTERNAL_ASSETS.md`](EXT
    different or absent test data must produce identical weights and fitted parameters.
    (This is why the LO TF-IDF vectorizer is fit on *training* LO text only.)
 3. **Progress bars off** in submission mode — tqdm's carriage returns can blow the log cap.
+4. **No cross-row feature inputs** while the question above is open (enforced by verify).
+5. **`main.py` must produce EVERY feature the model expects.** Not a written rule, but a
+   near-miss that would have wasted a weekly attempt: the bundle listed 185 features while
+   `main.py` computed 110, and the missing 40% arrived as NaN. LightGBM accepts NaN
+   silently, so every format check passed. `submission.verify::verify_feature_coverage` now
+   fails the build on any gap.
 
 ## Submission budget
 **Three full submissions per week.** Smoke tests, cancelled and failed jobs do **not**

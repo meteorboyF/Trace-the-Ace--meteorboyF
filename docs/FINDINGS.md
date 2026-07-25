@@ -257,6 +257,46 @@ a cause of it. Nothing here licenses telling tutors to correct less.
 
 ---
 
+### F7b. Feature redundancy is *contextual*, not a property of the features
+
+**Claim.** Whether a feature family is redundant depends on **what else is in the model at
+the time you measure it**. A single ablation therefore describes a configuration, not the
+features — and publishing it as if it described the features is a reproducibility trap.
+
+**Evidence.** The LO-alignment block was measured twice, unchanged, on the same data:
+
+| When measured | Marginal Δ | Interpretation |
+|---|---|---|
+| before `trajectory` existed | **+0.00059** | contributing |
+| after `trajectory` was added | **−0.00030 ± 0.00024** (5/5 seeds) | actively harmful |
+
+Nothing about the block changed. Its *neighbourhood* did: `trajectory` is scoped to the same
+top-k windows and reads them in order, so the alignment block's similarity scalars became
+redundant — and, being noisy, slightly harmful. The same pattern appears elsewhere: `feedback`
+measured +0.00046 on a single seed before `trajectory`, and −0.00007 ± 0.00014 after.
+
+A complementary demonstration of the same phenomenon: LO-alignment alone (0.54921) and
+structural alone (0.54878) score almost identically when each is paired with the topic prior,
+even though LO-alignment absorbs ~4× the gain when both are present. The families are largely
+**substitutes**, so measured contribution is a function of the stack.
+
+**Why it matters for practice.** Three consequences we now treat as standing rules:
+
+1. **Re-run the ablation after every addition.** Any earlier ablation is stale the moment a
+   correlated family joins the model.
+2. **Deprioritize, don't delete.** A family that looks redundant now may become informative
+   when a neighbouring family is improved or removed. We keep removed blocks behind a config
+   flag rather than deleting them — including LO-alignment, whose features are currently
+   dropped but which will be re-measured once semantic matching replaces lexical.
+3. **Report the stack alongside the ablation.** "Feature family X contributes Y" is
+   incomplete without stating what else was present.
+
+This also cautions against a common shortcut: reporting one ablation table as evidence that a
+proposed feature family is or is not useful *in general*. In a domain with correlated
+features — which dialogue certainly is — that claim does not follow.
+
+---
+
 ### F8. Order is the strongest single signal — aggregates throw it away
 
 **Claim.** *When* things happened inside the topic-relevant stretch of a lesson predicts

@@ -258,6 +258,81 @@ def verify_predictions(sub_csv: Path, result: VerifyResult, smoke: bool = False)
         )
 
 
+def verify_feature_coverage(
+    workdir: Path, result: VerifyResult, max_missing_frac: float = 0.0
+) -> None:
+    """Assert ``main.py`` actually PRODUCES every feature the model expects.
+
+    **This check exists because we nearly shipped without it.** The model bundle listed 185
+    features while ``main.py`` computed only 110 — the feedback, trajectory and LO-position
+    blocks were never wired into the inference path. The missing 40% arrived as NaN, which
+    LightGBM silently accepts, so every format check passed and the submission looked
+    healthy. It would have burned one of three weekly attempts on a model missing its
+    strongest block.
+
+    Format validity does not imply feature validity.
+    """
+    import joblib
+
+    bundle_path = workdir / "assets" / "model.joblib"
+    debug_path = workdir / "_produced_features.json"
+    if not bundle_path.is_file():
+        result.add("feature_coverage", False, f"{bundle_path} not found")
+        return
+    if not debug_path.is_file():
+        result.add(
+            "feature_coverage",
+            False,
+            "main.py did not emit _produced_features.json (run submission.smoke first)",
+        )
+        return
+
+    expected = set(joblib.load(bundle_path)["feature_cols"])
+    produced = set(json.loads(debug_path.read_text()))
+    missing = expected - produced
+    frac = len(missing) / max(len(expected), 1)
+    result.add(
+        "feature_coverage",
+        frac <= max_missing_frac,
+        (
+            f"{len(missing)}/{len(expected)} expected features NOT produced by main.py "
+            f"({frac:.1%}); e.g. {sorted(missing)[:5]}"
+            if missing
+            else f"all {len(expected)} expected features produced"
+        ),
+    )
+
+
+def verify_no_cross_row_features(workdir: Path, result: VerifyResult) -> None:
+    """Assert the shipped model uses no feature derived from OTHER test rows.
+
+    Competition rules require each test sample to be processed independently and preclude
+    "using information gathered across multiple test samples as feature inputs". Pending a
+    forum ruling we ship without them; this makes the guarantee mechanical, not remembered.
+    """
+    import joblib
+
+    from ..features.assemble import CROSS_ROW_FEATURES, cross_row_allowed
+
+    bundle_path = workdir / "assets" / "model.joblib"
+    if not bundle_path.is_file():
+        return
+    used = set(joblib.load(bundle_path)["feature_cols"]) & set(CROSS_ROW_FEATURES)
+    if cross_row_allowed():
+        result.add(
+            "no_cross_row_features",
+            True,
+            f"cross-row aggregates EXPLICITLY ENABLED ({len(used)} in use) — valid only if "
+            "the organizers have confirmed this is permitted",
+        )
+        return
+    result.add(
+        "no_cross_row_features",
+        not used,
+        f"model uses cross-row features {sorted(used)}" if used else "none used (rules-safe)",
+    )
+
+
 def project_runtime(
     n_test: int, seconds_for_sample: float, n_sample: int, result: VerifyResult
 ) -> float:
@@ -309,6 +384,12 @@ def verify(
     result.add(
         "no_network_imports", not all_net, "; ".join(all_net[:6]) or "no network-capable imports"
     )
+
+    # Feature-coverage + rules checks run against the unpacked smoke workdir.
+    smoke_dir = sdir / "_smoke"
+    if smoke_dir.is_dir():
+        verify_feature_coverage(smoke_dir, result)
+        verify_no_cross_row_features(smoke_dir, result)
 
     main_src = sources.get("main.py", "")
     result.add(

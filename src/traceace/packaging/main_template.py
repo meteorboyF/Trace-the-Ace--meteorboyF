@@ -82,7 +82,12 @@ def main() -> int:
     features = pd.read_csv(DATA / "test_features.csv", dtype=str)
     log("inputs read")
 
-    # ---- per-sample feature extraction; each sample independent -------------
+    # ---- per-sample feature extraction --------------------------------------
+    # INDEPENDENCE: every feature below is a function of (this row's learning objective,
+    # this session's own transcript, training-fitted parameters). Rows are grouped by
+    # session only to avoid re-reading the same transcript file — never to derive a value
+    # from another row. Cross-row aggregates are excluded from the model entirely unless
+    # the organizers confirm they are permitted (see conf/base.yaml).
     rows = []
     tdir = DATA / "test_transcripts"
     for sid, grp in features.groupby("session_id"):
@@ -100,16 +105,41 @@ def main() -> int:
             except Exception:
                 wm = None
 
+        # session-scope blocks: identical for every row of this session, computed once
         session_feats = ilib.all_session_features(tdf) if tdf is not None else {}
+        session_fb = (
+            ilib.feedback_features(tdf, prefix="fbs_") if tdf is not None else {}
+        )
 
         for _, r in grp.iterrows():
             feats = dict(session_feats)
+            feats.update(session_fb)
+            lo_text = str(r.get("learning_objective") or "")
+
             if tdf is not None and wm is not None:
                 try:
-                    feats.update(ilib.lo_alignment_features(
-                        tdf, str(r.get("learning_objective") or ""), vectorizer, wm, spans))
+                    feats.update(
+                        ilib.lo_alignment_features(tdf, lo_text, vectorizer, wm, spans)
+                    )
                 except Exception:
                     pass
+                try:
+                    # the top-k LO-relevant windows, merged and in chronological order
+                    keep = ilib.topk_spans(lo_text, vectorizer, wm, spans)
+                    sub = ilib.frame_from_spans(tdf, keep)
+                    feats.update(ilib.feedback_features(sub, prefix="fb_"))
+                    feats.update(ilib.trajectory_features(sub))
+                    feats.update(
+                        ilib.lo_position_features(
+                            keep,
+                            [keep],  # SAFE: no other test rows consulted
+                            len(tdf),
+                            tdf["t_seconds"].to_numpy(dtype=float),
+                        )
+                    )
+                except Exception:
+                    pass
+
             # Learning-objective difficulty prior, from TRAINING data only.
             # Must match the training-time feature name exactly (see models/gbdt.py).
             lo_id = r.get("learning_objective_id")
@@ -120,6 +150,18 @@ def main() -> int:
     log("features extracted")
 
     X = pd.DataFrame(rows)
+
+    # Audit trail for submission.verify: the NAMES of the features we produced.
+    # Names only — never values, counts or aggregates of the test data.
+    try:
+        import json as _json
+
+        (HERE / "_produced_features.json").write_text(
+            _json.dumps(sorted(c for c in X.columns if not c.startswith("_")))
+        )
+    except Exception:
+        pass
+
     lo_ids = X.pop("_lo_id").to_numpy() if "_lo_id" in X.columns else None
     ids = X.pop("response_id").to_numpy()
     for c in feature_cols:

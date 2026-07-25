@@ -9,7 +9,14 @@
 
 ---
 
-## Status: pipeline complete and verified end-to-end. No submission made yet.
+## Status: SUBMISSION READY (safe variant). Awaiting operator to submit.
+
+⚠️ **Two things need YOU, not me:**
+1. **Post the forum question** in [`FORUM_QUESTION.md`](FORUM_QUESTION.md) — it blocks a
+   +0.00251 log-loss feature set and the downside of guessing wrong is disqualification.
+2. **Submit** — see [`RUNBOOK.md`](RUNBOOK.md) "Submitting for real". I cannot submit on your
+   behalf (your account, and it consumes one of three weekly slots).
+3. **The L4 run** also needs you — this machine has no GPU. Cells are staged in the notebook.
 
 The full cheap ladder is built, runs on the real data, and produces a valid `submission.zip`.
 Everything so far has run on **CPU for zero units**.
@@ -20,7 +27,11 @@ Everything so far has run on **CPU for zero units**.
 |---|---|---|---|
 | `baseline.prior` | 0.60876 | 0.500 | +0.0569 |
 | `baseline.lo_only` (the bar) | 0.55220 ± 0.00022 | 0.707 | — |
-| **`model.gbdt` (current best, 5 blocks)** | **0.54088 ± 0.00055** | **0.72576 ± 0.00085** | **−0.01132 ± 0.00066 ✅** |
+| `model.gbdt` (all features, **rules-risky**) | 0.54088 ± 0.00055 | 0.72576 ± 0.00085 | −0.01132 ± 0.00066 |
+| **`model.gbdt` SAFE (shipped)** | **0.54339 ± 0.00058** | — | **−0.00881 ± 0.00070 ✅** |
+
+**Cost of rules safety: +0.00251 log loss** — we exclude 4 cross-row features pending a forum
+ruling (ADR-009). A DQ would end the competition; 0.0025 log loss would not.
 
 5-fold session-grouped CV on all 35,072 responses, **repeated over 5 fold assignments**.
 The improvement's 95% CI is [−0.01191, −0.01074] and excludes zero on all 5 seeds.
@@ -67,7 +78,10 @@ on a single-seed difference below ~1e-3.
 2. **Only 2 of 6 blocks are distinguishable from zero.** Redundancy is contextual: LO-alignment
    went from +0.00059 to −0.00030 when trajectory was added. Re-run the ablation after EVERY
    addition; never trust a stale one.
-3. **Semantic LO-alignment + content block are built but not run at scale.**
+3. **`main.py` was missing 40% of its features until 2026-07-26** — the feedback, trajectory
+   and LO-position blocks were never wired in, arriving as NaN. Fixed, and now impossible to
+   repeat: `verify_feature_coverage` fails the build on any gap (ADR-010).
+4. **Semantic LO-alignment + content block are built but not run at scale.**
    `features.window_embeddings` is validated end-to-end on CPU (40 sessions); full extraction
    needs an L4, projected **35–52 min ≈ 3–4 units**. `features.content` (pooled top-k window
    vectors, PCA-48) is validated and waiting on those vectors. Highest-value pending work.

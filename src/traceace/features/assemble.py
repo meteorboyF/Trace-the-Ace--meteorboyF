@@ -61,6 +61,34 @@ DEFAULT_BLOCKS = [
 # ALL_BLOCKS is what the ablation sweeps, so negative results stay visible in the report.
 ALL_BLOCKS = [*DEFAULT_BLOCKS[:3], "lo_alignment", *DEFAULT_BLOCKS[3:]]
 
+# ---------------------------------------------------------------------------
+# CROSS-ROW FEATURES — competition-rules exposure. See conf/base.yaml.
+# ---------------------------------------------------------------------------
+# These are the ONLY features whose value depends on other rows of the feature file
+# (they are computed by grouping rows that share a session_id). Everything else is a
+# function of (this row's learning objective, this session's transcript, training-fitted
+# parameters) and is therefore independent by construction.
+#
+# Audited exhaustively 2026-07-26 by tracing every feature function's inputs: the sole
+# cross-row argument anywhere in the codebase is `all_lo_spans` in
+# `inference_lib.lo_position_features`, which feeds exactly these four.
+CROSS_ROW_FEATURES: frozenset[str] = frozenset(
+    {
+        "lopos_n_competing_los",  # count of objectives assessed in the same session
+        "lopos_ordinal",  # rank of this objective among the session's objectives
+        "lopos_ordinal_frac",  # same, normalized
+        "lopos_overlap_with_others",  # overlap of this objective's window with the others'
+    }
+)
+
+
+def cross_row_allowed() -> bool:
+    """Whether cross-row aggregates may be used as feature inputs (default: NO)."""
+    from ..config import get_config
+
+    return bool(get_config().get("features", "allow_cross_row_aggregates", default=False))
+
+
 # Columns that are identifiers/labels, never features.
 NON_FEATURE = {
     "response_id",
@@ -103,6 +131,17 @@ def build_matrix(
         log.info("assemble: joined block %s on %s (%d cols)", name, key, df.shape[1] - 1)
 
     feat_cols = [c for c in out.columns if c not in NON_FEATURE]
+    # Drop rules-risky cross-row aggregates unless explicitly enabled.
+    if not cross_row_allowed():
+        dropped_cross = [c for c in feat_cols if c in CROSS_ROW_FEATURES]
+        if dropped_cross:
+            log.info(
+                "assemble: EXCLUDING %d cross-row feature(s) for rules safety: %s "
+                "(set features.allow_cross_row_aggregates=true to include)",
+                len(dropped_cross),
+                sorted(dropped_cross),
+            )
+        feat_cols = [c for c in feat_cols if c not in CROSS_ROW_FEATURES]
     # keep only numeric feature columns
     numeric = out[feat_cols].select_dtypes(include="number").columns.tolist()
     dropped = set(feat_cols) - set(numeric)

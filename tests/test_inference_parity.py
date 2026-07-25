@@ -85,3 +85,57 @@ def test_inference_lib_never_prints():
 
     src = Path(ilib.__file__).read_text()
     assert "print(" not in src, "inference_lib must not print — it handles test data"
+
+
+def test_feedback_parity(synth_repo, synth_transcript):
+    """Feedback block: training and inference share one implementation, so this pins it."""
+    from traceace.packaging.inference_lib import feedback_features
+
+    train_df, infer_df = _both(synth_transcript)
+    a = feedback_features(train_df, prefix="fbs_")
+    b = feedback_features(infer_df, prefix="fbs_")
+    assert set(a) == set(b)
+    for k in a:
+        assert np.isclose(a[k], b[k], equal_nan=True), f"{k}: {a[k]} vs {b[k]}"
+
+
+def test_trajectory_parity(synth_repo, synth_transcript):
+    from traceace.packaging.inference_lib import trajectory_features
+
+    train_df, infer_df = _both(synth_transcript)
+    a = trajectory_features(train_df)
+    b = trajectory_features(infer_df)
+    assert set(a) == set(b)
+    for k in a:
+        assert np.isclose(a[k], b[k], equal_nan=True), f"{k}: {a[k]} vs {b[k]}"
+
+
+def test_every_block_is_wired_into_main_py():
+    """Each feature prefix the model can emit must be produced by the generated main.py.
+
+    Regression test for the near-miss where main.py computed 110 of 185 expected features
+    and the missing 40% arrived as NaN — format checks all passed.
+    """
+    from traceace.packaging.main_template import MAIN_TEMPLATE
+
+    required_calls = [
+        "all_session_features",  # struct_ / ling_ / temp_
+        "lo_alignment_features",  # lo_
+        "feedback_features",  # fb_ / fbs_
+        "trajectory_features",  # traj_
+        "lo_position_features",  # lopos_
+        "lo_prior_enc",  # topic prior
+    ]
+    for call in required_calls:
+        assert call in MAIN_TEMPLATE, f"main.py does not compute {call}"
+
+
+def test_main_py_does_not_use_cross_row_aggregates():
+    """main.py must pass only THIS row's spans to lo_position_features.
+
+    Passing the session's other objectives would make the feature depend on other test
+    rows, which the independent-processing rule may preclude (docs/FORUM_QUESTION.md).
+    """
+    from traceace.packaging.main_template import MAIN_TEMPLATE
+
+    assert "[keep],  # SAFE: no other test rows consulted" in MAIN_TEMPLATE

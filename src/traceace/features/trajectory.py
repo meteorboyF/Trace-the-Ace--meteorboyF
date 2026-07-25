@@ -25,13 +25,13 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from ..cache import load_or_compute
 from ..io import load_train_features
 from ..logging_utils import get_logger
 from ..packaging.inference_lib import lo_position_features, trajectory_features
+from ..packaging.inference_lib import topk_spans as _shared_topk_spans
 from ..paths import transcripts_dir
 from ..progress import pbar
 from ..staging import stage_local
@@ -45,26 +45,7 @@ log = get_logger("features.trajectory")
 VERSION = "v1"
 
 
-def _topk_spans(
-    lo_text: str, vec: Any, window_matrix: Any, spans: list[tuple[int, int]], topk: int
-) -> list[tuple[int, int]]:
-    """Top-k window spans for one objective, merged and in chronological order."""
-    from sklearn.metrics.pairwise import cosine_similarity
-
-    if not spans or window_matrix is None:
-        return []
-    sims = cosine_similarity(vec.transform([lo_text or ""]), window_matrix).ravel()
-    top = np.argsort(-sims)[: min(topk, len(sims))]
-    chosen = sorted(spans[int(i)] for i in top)
-    merged: list[tuple[int, int]] = []
-    for s, e in chosen:
-        if merged and s <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
-        else:
-            merged.append((s, e))
-    return merged
-
-
+# Window selection comes from inference_lib so training and submission agree exactly.
 @task(
     "features.trajectory",
     requires="cpu",
@@ -108,7 +89,7 @@ def build(
             # competition, so resolve them all before emitting any row.
             lo_spans: dict[str, list[tuple[int, int]]] = {}
             for _, r in grp.iterrows():
-                lo_spans[str(r["response_id"])] = _topk_spans(
+                lo_spans[str(r["response_id"])] = _shared_topk_spans(
                     str(r["learning_objective"]), vec, wm, spans, topk
                 )
             all_spans = list(lo_spans.values())

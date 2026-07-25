@@ -62,6 +62,20 @@ selftest:
   n_sessions: 50
   max_seconds: 300
 
+# --- Competition-rules safety -------------------------------------------------
+# The rules require each test sample to be processed INDEPENDENTLY, and explicitly
+# preclude "using information gathered across multiple test samples as feature inputs".
+#
+# A few lo_position features are computed by GROUPING test rows that share a session_id
+# (e.g. counting how many objectives were assessed in the same lesson). Whether that is
+# permitted is genuinely ambiguous — session grouping is provided metadata, not inferred —
+# so a forum question is pending (docs/COMPETITION.md).
+#
+# DEFAULT IS SAFE: cross-row aggregates are EXCLUDED. Flip to true only after the
+# organizers confirm it is allowed. A slightly worse score beats a disqualification.
+features:
+  allow_cross_row_aggregates: false
+
 # --- Embeddings ---------------------------------------------------------------
 # Frozen extraction on L4, cached forever. Model must be commercial-use licensed.
 embeddings:

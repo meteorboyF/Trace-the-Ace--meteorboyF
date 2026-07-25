@@ -34,7 +34,7 @@ import pandas as pd
 from ..cache import load_or_compute
 from ..io import load_train_features
 from ..logging_utils import get_logger
-from ..packaging.inference_lib import feedback_features
+from ..packaging.inference_lib import feedback_features, frame_from_spans, topk_spans
 from ..paths import transcripts_dir
 from ..progress import pbar
 from ..staging import stage_local
@@ -57,29 +57,13 @@ def _topk_window_frame(
     spans: list[tuple[int, int]],
     topk: int = TOPK,
 ) -> pd.DataFrame:
-    """Concatenate the top-k LO-relevant windows, in transcript order.
+    """Top-k LO-relevant windows, in transcript order.
 
-    Order matters here (unlike in the LO-alignment block's bag-of-statistics): feedback
-    features walk the dialogue sequentially to find attempt→correction→affirmation
-    episodes, so the windows must be stitched back in chronological order.
+    Thin wrapper over the shared implementation in ``inference_lib`` so the training and
+    submission paths select *identical* windows — the blocks scoped to these windows are
+    the strongest in the model, so any divergence here would be silently costly.
     """
-    import numpy as np
-    from sklearn.metrics.pairwise import cosine_similarity
-
-    if not spans or window_matrix is None:
-        return df.iloc[0:0]
-    sims = cosine_similarity(vec.transform([lo_text or ""]), window_matrix).ravel()
-    top = np.argsort(-sims)[: min(topk, len(sims))]
-    # merge overlapping spans, then take them in chronological order
-    chosen = sorted(spans[int(i)] for i in top)
-    keep: list[tuple[int, int]] = []
-    for s, e in chosen:
-        if keep and s <= keep[-1][1]:
-            keep[-1] = (keep[-1][0], max(keep[-1][1], e))
-        else:
-            keep.append((s, e))
-    parts = [df.iloc[s:e] for s, e in keep]
-    return pd.concat(parts) if parts else df.iloc[0:0]
+    return frame_from_spans(df, topk_spans(lo_text, vec, window_matrix, spans, topk))
 
 
 @task(

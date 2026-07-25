@@ -81,6 +81,14 @@ not complements** — which is also why adding any single new family moves the s
 family X matters." Importance measures what a model *used*; only ablation measures what is
 *lost* without it.
 
+**And redundancy is contextual, not intrinsic.** We measured the LO-alignment family twice,
+unchanged, on the same data: **+0.00059** before an order-sensitive family existed, and
+**−0.00030 ± 0.00024** afterwards. Nothing about the block changed; its neighbourhood did.
+A single ablation table describes a *configuration*, not the features — so it should be
+re-run after every addition, reported together with what else was in the model, and never
+used to argue that a feature family is useless in general. In a domain with correlated
+features, which dialogue certainly is, that inference does not follow.
+
 ### 1.4 Order and time allocation dominate; disfluency follows; most families are unmeasurable
 
 Paired leave-one-block-out across 5 fold assignments:
