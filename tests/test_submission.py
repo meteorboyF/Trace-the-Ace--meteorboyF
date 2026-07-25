@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from traceace.evaluate import clip_probs, logloss
 from traceace.packaging.verify import (
@@ -43,7 +42,7 @@ def test_scan_allows_sanctioned_log_wrapper():
 
 def test_scan_flags_leak_through_log_call_site():
     src = (
-        'def log(msg: str) -> None:\n    print(msg, flush=True)\n\n'
+        "def log(msg: str) -> None:\n    print(msg, flush=True)\n\n"
         'def g(df):\n    log(f"n={len(df)}")\n'
     )
     leaks, _ = scan_source(src, "main.py")
@@ -70,12 +69,12 @@ def test_progress_disabled_detection():
 # --- submission format round-trip -------------------------------------------
 def test_verify_predictions_round_trip(tmp_path, synth_repo, monkeypatch):
     fmt = pd.DataFrame({"response_id": [f"r{i}" for i in range(20)], "probability": 0.5})
-    monkeypatch.setattr("traceace.packaging.verify.load_submission_format",
-                        lambda smoke=False: fmt)
+    monkeypatch.setattr("traceace.packaging.verify.load_submission_format", lambda smoke=False: fmt)
 
     good = tmp_path / "good.csv"
-    pd.DataFrame({"response_id": fmt["response_id"],
-                  "probability": np.linspace(0.01, 0.99, 20)}).to_csv(good, index=False)
+    pd.DataFrame(
+        {"response_id": fmt["response_id"], "probability": np.linspace(0.01, 0.99, 20)}
+    ).to_csv(good, index=False)
     res = VerifyResult()
     verify_predictions(good, res)
     assert res.ok, [c.name for c in res.failures]
@@ -83,12 +82,12 @@ def test_verify_predictions_round_trip(tmp_path, synth_repo, monkeypatch):
 
 def test_verify_catches_wrong_row_order(tmp_path, synth_repo, monkeypatch):
     fmt = pd.DataFrame({"response_id": [f"r{i}" for i in range(20)], "probability": 0.5})
-    monkeypatch.setattr("traceace.packaging.verify.load_submission_format",
-                        lambda smoke=False: fmt)
+    monkeypatch.setattr("traceace.packaging.verify.load_submission_format", lambda smoke=False: fmt)
 
     bad = tmp_path / "bad.csv"
-    pd.DataFrame({"response_id": fmt["response_id"][::-1].to_numpy(),
-                  "probability": 0.5}).to_csv(bad, index=False)
+    pd.DataFrame({"response_id": fmt["response_id"][::-1].to_numpy(), "probability": 0.5}).to_csv(
+        bad, index=False
+    )
     res = VerifyResult()
     verify_predictions(bad, res)
     assert any(c.name == "row_ORDER_matches" and not c.passed for c in res.checks)
@@ -96,25 +95,24 @@ def test_verify_catches_wrong_row_order(tmp_path, synth_repo, monkeypatch):
 
 def test_verify_catches_out_of_range_probability(tmp_path, synth_repo, monkeypatch):
     fmt = pd.DataFrame({"response_id": [f"r{i}" for i in range(5)], "probability": 0.5})
-    monkeypatch.setattr("traceace.packaging.verify.load_submission_format",
-                        lambda smoke=False: fmt)
+    monkeypatch.setattr("traceace.packaging.verify.load_submission_format", lambda smoke=False: fmt)
 
     bad = tmp_path / "bad.csv"
-    pd.DataFrame({"response_id": fmt["response_id"],
-                  "probability": [0.5, 1.5, -0.2, 0.3, 0.4]}).to_csv(bad, index=False)
+    pd.DataFrame(
+        {"response_id": fmt["response_id"], "probability": [0.5, 1.5, -0.2, 0.3, 0.4]}
+    ).to_csv(bad, index=False)
     res = VerifyResult()
     verify_predictions(bad, res)
-    assert any(c.name == "probabilities_in_unit_interval" and not c.passed
-               for c in res.checks)
+    assert any(c.name == "probabilities_in_unit_interval" and not c.passed for c in res.checks)
 
 
 def test_verify_catches_nan(tmp_path, synth_repo, monkeypatch):
     fmt = pd.DataFrame({"response_id": [f"r{i}" for i in range(4)], "probability": 0.5})
-    monkeypatch.setattr("traceace.packaging.verify.load_submission_format",
-                        lambda smoke=False: fmt)
+    monkeypatch.setattr("traceace.packaging.verify.load_submission_format", lambda smoke=False: fmt)
     bad = tmp_path / "bad.csv"
-    pd.DataFrame({"response_id": fmt["response_id"],
-                  "probability": [0.5, np.nan, 0.3, 0.4]}).to_csv(bad, index=False)
+    pd.DataFrame(
+        {"response_id": fmt["response_id"], "probability": [0.5, np.nan, 0.3, 0.4]}
+    ).to_csv(bad, index=False)
     res = VerifyResult()
     verify_predictions(bad, res)
     assert any(c.name == "no_nan_probabilities" and not c.passed for c in res.checks)

@@ -8,6 +8,7 @@ Used by the pre-commit framework and CI; the native git hook is the always-on ba
 suite out of the repository — CI then collected zero tests and failed, while every gate
 passed locally.
 """
+
 from __future__ import annotations
 
 import re

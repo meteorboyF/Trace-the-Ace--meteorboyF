@@ -12,7 +12,6 @@ they agree value-for-value.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from traceace.features.common import normalize_frame as train_normalize
 from traceace.features.linguistic import session_linguistic_features

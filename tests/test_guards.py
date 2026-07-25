@@ -27,10 +27,12 @@ def test_guard_refuses_when_below_required_tier(synth_repo, monkeypatch):
     """A task needing an L4 must refuse on CPU and name the runtime to switch to."""
     from traceace import runtime, tasks
 
-    monkeypatch.setattr(runtime, "detect_accelerator",
-                        lambda: runtime.Accelerator("cpu", "CPU", None))
-    monkeypatch.setattr(tasks, "detect_accelerator",
-                        lambda: runtime.Accelerator("cpu", "CPU", None))
+    monkeypatch.setattr(
+        runtime, "detect_accelerator", lambda: runtime.Accelerator("cpu", "CPU", None)
+    )
+    monkeypatch.setattr(
+        tasks, "detect_accelerator", lambda: runtime.Accelerator("cpu", "CPU", None)
+    )
     with pytest.raises(RuntimeError, match="needs at least 'l4'"):
         tasks.run("features.embeddings")
 
@@ -49,8 +51,9 @@ def test_guard_refuses_wasteful_tier_by_default(synth_repo, monkeypatch):
 def test_drive_path_detection(tmp_path):
     drive = tmp_path / "drive"
     (drive / "data").mkdir(parents=True)
-    traceace.configure(repo_dir=_repo_root(), drive_root=drive, work_dir=tmp_path / "work",
-                       quiet=True)
+    traceace.configure(
+        repo_dir=_repo_root(), drive_root=drive, work_dir=tmp_path / "work", quiet=True
+    )
     assert is_drive_path(drive / "data" / "x.parquet")
     assert not is_drive_path(tmp_path / "work" / "x.parquet")
 
@@ -58,8 +61,9 @@ def test_drive_path_detection(tmp_path):
 def test_iterating_drive_path_raises(tmp_path):
     drive = tmp_path / "drive"
     (drive / "data").mkdir(parents=True)
-    traceace.configure(repo_dir=_repo_root(), drive_root=drive, work_dir=tmp_path / "work",
-                       quiet=True)
+    traceace.configure(
+        repo_dir=_repo_root(), drive_root=drive, work_dir=tmp_path / "work", quiet=True
+    )
     with pytest.raises(DrivePathError):
         list(iter_files(drive / "data", "*.csv"))
     with pytest.raises(DrivePathError):
@@ -70,8 +74,9 @@ def test_local_path_iteration_allowed(tmp_path):
     work = tmp_path / "work"
     (work / "d").mkdir(parents=True)
     (work / "d" / "a.csv").write_text("x")
-    traceace.configure(repo_dir=_repo_root(), drive_root=tmp_path / "drive", work_dir=work,
-                       quiet=True)
+    traceace.configure(
+        repo_dir=_repo_root(), drive_root=tmp_path / "drive", work_dir=work, quiet=True
+    )
     assert [p.name for p in iter_files(work / "d", "*.csv")] == ["a.csv"]
 
 
@@ -112,8 +117,11 @@ def test_stage_local_is_noop_when_already_staged(tmp_path, monkeypatch):
 
     assert staging.is_staged()
     calls = {"extract": 0}
-    monkeypatch.setattr(staging, "_extract_archive",
-                        lambda *a, **k: calls.__setitem__("extract", calls["extract"] + 1))
+    monkeypatch.setattr(
+        staging,
+        "_extract_archive",
+        lambda *a, **k: calls.__setitem__("extract", calls["extract"] + 1),
+    )
     staging.stage_local()
     staging.stage_local()
     assert calls["extract"] == 0, "staging must be a no-op when already staged"
@@ -159,17 +167,19 @@ def test_subsampled_oof_cannot_clobber_full_oof(synth_repo):
     from traceace.evaluate import experiment_name, load_oof, oof_path, save_oof
     from traceace.io import LABEL_COL
 
-    full = pd.DataFrame({
-        "response_id": [f"r{i}" for i in range(10)],
-        "session_id": [f"s{i}" for i in range(10)],
-        LABEL_COL: [1.0, 0.0] * 5,
-        "pred": [0.9] * 10,
-    })
+    full = pd.DataFrame(
+        {
+            "response_id": [f"r{i}" for i in range(10)],
+            "session_id": [f"s{i}" for i in range(10)],
+            LABEL_COL: [1.0, 0.0] * 5,
+            "pred": [0.9] * 10,
+        }
+    )
     sub = full.head(4).copy()
     sub["pred"] = 0.1
 
-    save_oof("baseline.lo_only", full)                    # full-data run
-    save_oof("baseline.lo_only", sub, subsample=400)      # smoke run
+    save_oof("baseline.lo_only", full)  # full-data run
+    save_oof("baseline.lo_only", sub, subsample=400)  # smoke run
 
     assert oof_path(experiment_name("baseline.lo_only", None)) != oof_path(
         experiment_name("baseline.lo_only", 400)
@@ -188,12 +198,14 @@ def test_baseline_logloss_is_subsample_matched(synth_repo):
     from traceace.evaluate import baseline_logloss, save_oof
     from traceace.io import LABEL_COL
 
-    full = pd.DataFrame({
-        "response_id": [f"r{i}" for i in range(20)],
-        "session_id": [f"s{i}" for i in range(20)],
-        LABEL_COL: [1.0, 0.0] * 10,
-        "pred": [0.5] * 20,
-    })
+    full = pd.DataFrame(
+        {
+            "response_id": [f"r{i}" for i in range(20)],
+            "session_id": [f"s{i}" for i in range(20)],
+            LABEL_COL: [1.0, 0.0] * 10,
+            "pred": [0.5] * 20,
+        }
+    )
     sub = full.head(6).copy()
     sub["pred"] = 0.8
     save_oof("baseline.lo_only", full)
