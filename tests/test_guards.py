@@ -241,3 +241,28 @@ def test_submission_build_reads_full_data_models_only():
     # every artifact lookup in the builder passes an explicit None (full data)
     assert "experiment_dir(experiment, None)" in src
     assert "models_dir() / experiment.replace" not in src
+
+
+def test_headline_tolerates_distribution_metrics():
+    """Repeated-seed tasks report dicts, not scalars — the summary must not crash.
+
+    Regression test: `_pick_headline` formatted metrics with `:.5f`, so a task returning
+    {"mean":..., "sd":...} raised TypeError AFTER the task had already succeeded, losing
+    the console report of a multi-minute run.
+    """
+    from traceace.tasks import _pick_headline
+
+    scalar = _pick_headline({"logloss": 0.5, "delta_vs_lo_only": -0.01, "auc": 0.7})
+    assert "logloss=0.50000" in scalar
+
+    dist = _pick_headline(
+        {
+            "logloss": {"mean": 0.5432, "sd": 0.0004},
+            "delta_vs_lo_only": {"mean": -0.0088, "sd": 0.0005},
+            "auc": {"mean": 0.7217},
+        }
+    )
+    assert "logloss=0.54320" in dist
+    assert "± 0.00050" in dist
+
+    assert _pick_headline({"logloss": None, "auc": "n/a"}) == ""

@@ -51,7 +51,7 @@ def auc(y: np.ndarray, p: np.ndarray) -> float:
 
 
 # --- OOF persistence ---------------------------------------------------------
-def experiment_name(base: str, subsample: int | None) -> str:
+def experiment_name(base: str, subsample: int | None, cv_seed: int | None = None) -> str:
     """Namespace an experiment by subsample size.
 
     **This exists because of a real bug.** OOF frames were originally keyed by experiment
@@ -61,14 +61,17 @@ def experiment_name(base: str, subsample: int | None) -> str:
     with no error raised anywhere. Subsampled results must never share a key with
     full-data results.
     """
-    return base if subsample is None else f"{base}__sub{subsample}"
+    name = base if subsample is None else f"{base}__sub{subsample}"
+    return name if cv_seed is None else f"{name}__cv{cv_seed}"
 
 
 def oof_path(experiment: str) -> Path:
     return oof_dir() / f"{experiment.replace('.', '_')}.parquet"
 
 
-def experiment_dir(experiment: str, subsample: int | None = None) -> Path:
+def experiment_dir(
+    experiment: str, subsample: int | None = None, cv_seed: int | None = None
+) -> Path:
     """Directory for an experiment's model artifacts, namespaced by subsample.
 
     Same reasoning as :func:`experiment_name`, but the stakes are higher: ``submission.build``
@@ -76,10 +79,15 @@ def experiment_dir(experiment: str, subsample: int | None = None) -> Path:
     overwrite the full-data models and would have shipped a submission trained on 1.7% of the
     data — silently, since the files are valid LightGBM boosters either way.
     """
-    return models_dir() / experiment_name(experiment, subsample).replace(".", "_")
+    return models_dir() / experiment_name(experiment, subsample, cv_seed).replace(".", "_")
 
 
-def save_oof(experiment: str, df: pd.DataFrame, subsample: int | None = None) -> Path:
+def save_oof(
+    experiment: str,
+    df: pd.DataFrame,
+    subsample: int | None = None,
+    cv_seed: int | None = None,
+) -> Path:
     """Persist OOF predictions. Required for calibration and blending (§10.2).
 
     Pass ``subsample`` so a smoke run cannot overwrite a full-data experiment.
@@ -88,15 +96,17 @@ def save_oof(experiment: str, df: pd.DataFrame, subsample: int | None = None) ->
     missing = required - set(df.columns)
     if missing:
         raise KeyError(f"OOF frame for {experiment!r} missing columns {missing}")
-    name = experiment_name(experiment, subsample)
+    name = experiment_name(experiment, subsample, cv_seed)
     path = oof_path(name)
     write_parquet(df[sorted(df.columns)], path)
     log.info("saved OOF for %s -> %s (%d rows)", name, path, len(df))
     return path
 
 
-def load_oof(experiment: str, subsample: int | None = None) -> pd.DataFrame:
-    name = experiment_name(experiment, subsample)
+def load_oof(
+    experiment: str, subsample: int | None = None, cv_seed: int | None = None
+) -> pd.DataFrame:
+    name = experiment_name(experiment, subsample, cv_seed)
     path = oof_path(name)
     if not path.is_file():
         raise FileNotFoundError(f"no OOF for {name!r} at {path} — run that task first")
@@ -108,7 +118,7 @@ def list_oof() -> list[str]:
 
 
 # --- scoring -----------------------------------------------------------------
-def baseline_logloss(subsample: int | None = None) -> float | None:
+def baseline_logloss(subsample: int | None = None, cv_seed: int | None = None) -> float | None:
     """OOF log loss of ``baseline.lo_only`` at the SAME subsample size.
 
     Comparing a subsampled model against a full-data baseline (or vice versa) is
@@ -116,14 +126,17 @@ def baseline_logloss(subsample: int | None = None) -> float | None:
     like-for-like.
     """
     try:
-        b = load_oof(BASELINE_KEY, subsample=subsample)
+        b = load_oof(BASELINE_KEY, subsample=subsample, cv_seed=cv_seed)
     except FileNotFoundError:
         return None
     return logloss(b[LABEL_COL].to_numpy(), b["pred"].to_numpy())
 
 
 def score_frame(
-    df: pd.DataFrame, experiment: str = "", subsample: int | None = None
+    df: pd.DataFrame,
+    experiment: str = "",
+    subsample: int | None = None,
+    cv_seed: int | None = None,
 ) -> dict[str, Any]:
     """Score an OOF frame: log loss (headline), AUC, and delta vs baseline.lo_only."""
     y = df[LABEL_COL].to_numpy()
@@ -136,8 +149,9 @@ def score_frame(
         "n": int(len(df)),
         "pos_rate": float(np.mean(y)),
         "subsample": subsample,
+        "cv_seed": cv_seed,
     }
-    base = baseline_logloss(subsample=subsample)
+    base = baseline_logloss(subsample=subsample, cv_seed=cv_seed)
     if base is not None:
         # negative delta = better than the LO-only bar (lower log loss is better)
         out["baseline_lo_only_logloss"] = base
@@ -145,7 +159,7 @@ def score_frame(
         out["beats_lo_only"] = bool(ll < base)
         # Guard against the row-count mismatch that made this bug invisible.
         try:
-            nb = len(load_oof(BASELINE_KEY, subsample=subsample))
+            nb = len(load_oof(BASELINE_KEY, subsample=subsample, cv_seed=cv_seed))
             if nb != len(df):
                 out["WARNING_baseline_row_mismatch"] = f"model n={len(df)} vs baseline n={nb}"
                 log.error(

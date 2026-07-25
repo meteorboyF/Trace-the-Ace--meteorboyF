@@ -1,6 +1,6 @@
 # STATE.md — read this first
 
-**Last updated:** 2026-07-26 · **git SHA:** `183bca5` · **CI: green ✅**
+**Last updated:** 2026-07-26 · **CI: green ✅** · all numbers are mean ± SD over 5 fold assignments
 **Competition deadline:** model submissions 2026-08-27 23:59 UTC · write-up 2026-09-15
 **Entry:** solo · **Units remaining: 733.00 / 733** (everything so far ran on CPU, 0 units)
 
@@ -19,12 +19,26 @@ Everything so far has run on **CPU for zero units**.
 | Model | CV log loss | AUC | Δ vs `lo_only` |
 |---|---|---|---|
 | `baseline.prior` | 0.60876 | 0.500 | +0.0569 |
-| `baseline.lo_only` (the bar) | 0.55184 | 0.707 | — |
-| `model.gbdt` (4 blocks) | 0.54306 | 0.7223 | −0.00878 |
-| **`model.gbdt` + Platt (current best)** | **0.543005** | **0.7223** | **−0.00883 ✅ beats the bar** |
+| `baseline.lo_only` (the bar) | 0.55220 ± 0.00022 | 0.707 | — |
+| **`model.gbdt` (current best, 5 blocks)** | **0.54088 ± 0.00055** | **0.72576 ± 0.00085** | **−0.01132 ± 0.00066 ✅** |
 
-5-fold session-grouped CV on all 35,072 responses. Full table: [`EXPERIMENTS.md`](EXPERIMENTS.md).
+5-fold session-grouped CV on all 35,072 responses, **repeated over 5 fold assignments**.
+The improvement's 95% CI is [−0.01191, −0.01074] and excludes zero on all 5 seeds.
+Full table: [`EXPERIMENTS.md`](EXPERIMENTS.md).
 **No leaderboard submission has been made** — LB score unknown.
+
+### Block contributions (paired, 5 seeds) — the only valid basis for block decisions
+| Block | Δ (mean ± SD) | Verdict |
+|---|---|---|
+| trajectory | +0.00226 ± 0.00011 | ✅ real (strongest) |
+| linguistic | +0.00174 ± 0.00025 | ✅ real |
+| lo_alignment | −0.00030 ± 0.00024 | ⚠️ hurts — features dropped, module retained |
+| feedback | −0.00007 ± 0.00014 | ✗ unmeasurable |
+| structural | +0.00006 ± 0.00030 | ✗ unmeasurable |
+| temporal | +0.00005 ± 0.00047 | ✗ unmeasurable |
+
+**Noise floor: paired SD ≈5e-4; headline varies 0.00105 across seeds.** Never decide a block
+on a single-seed difference below ~1e-3.
 
 ## What works
 - **All 27 tasks** registered and runnable via `traceace.tasks.run(name)`.
@@ -48,17 +62,15 @@ Everything so far has run on **CPU for zero units**.
   model dirs, so a smoke run can never corrupt a full-data result or a submission.
 
 ## Known problems / open risks
-1. **The margin over the baseline is still thin** (−0.0088). Most of the model's power is the
-   topic prior, not the transcript. Improving the *transcript* contribution remains the main
-   modeling task — and the main research story.
-2. **The blocks are largely substitutes, not complements.** LO-alignment alone (0.54921) and
-   structural alone (0.54878) score nearly the same. This caps what any one new block adds
-   and is the strongest argument for the semantic-alignment upgrade (next action 1).
-3. **Temporal block is excluded** — measured contribution −0.00049 (it hurts). Kept
-   registered so the negative result stays reportable. See [`FINDINGS.md`](FINDINGS.md) N1.
-4. **Semantic LO-alignment is built but not run at scale.** `features.window_embeddings`
-   is validated end-to-end on CPU (40 sessions) but the full extraction needs an L4;
-   projected **35–52 min ≈ 3–4 units**. This is the single highest-value pending experiment.
+1. **The margin is thin but now solid** (−0.01132 ± 0.00066, CI excludes zero on 5/5 seeds).
+   Most of the model's power is still the topic prior.
+2. **Only 2 of 6 blocks are distinguishable from zero.** Redundancy is contextual: LO-alignment
+   went from +0.00059 to −0.00030 when trajectory was added. Re-run the ablation after EVERY
+   addition; never trust a stale one.
+3. **Semantic LO-alignment + content block are built but not run at scale.**
+   `features.window_embeddings` is validated end-to-end on CPU (40 sessions); full extraction
+   needs an L4, projected **35–52 min ≈ 3–4 units**. `features.content` (pooled top-k window
+   vectors, PCA-48) is validated and waiting on those vectors. Highest-value pending work.
 5. **`annotate.moves` has only run with the `heuristic` backend.** The vLLM backend is
    written but unexercised.
 6. Local env now has **torch (CPU) + sentence-transformers** installed so GPU code paths can
@@ -66,17 +78,19 @@ Everything so far has run on **CPU for zero units**.
 7. Git SHAs in early run manifests read `unknown` (they predate the first commit).
 
 ## Next actions, in order
-1. **L4 session — semantic LO-alignment (~3–4 units).** THE highest-value experiment.
-   `run("features.window_embeddings", subsample=500)` to smoke, then the full run, then
-   `run("features.lo_alignment", backend="embedding", force=True)` and re-run `model.gbdt`.
-   Lexical matching is the current ceiling: objectives and dialogue rarely share literal
-   wording. Projected 35–52 min on L4 (measured from CPU throughput).
-2. **Move taxonomy**: `annotate.moves` with the vLLM backend seeded by the feedback
-   categories, then `model.move_classifier`, then add move-distribution features.
+1. **L4 session — semantic alignment + content block (~3–4 units).** THE highest-value
+   experiment. Smoke `run("features.window_embeddings", subsample=500)`, then the full run,
+   then `run("features.lo_alignment", backend="embedding", force=True)`,
+   `run("features.content")`, and finally `run("interpret.ablation_repeated")` to re-rank.
+   Lexical matching is the current ceiling and it now measurably *hurts*; semantic matching
+   is the fix, and the pooled content vectors add *what was said* as orthogonal evidence.
+2. **Move taxonomy**: `annotate.moves` (vLLM backend) seeded by the feedback categories, then
+   `model.move_classifier`, then move-distribution features.
 3. **First real submission** once step 1 lands. Budget: 3/week, ~15 attempts left.
 4. **A100 timing validation (~4 units)** only immediately before a real submission.
-5. Tuning is **not** a next action — a capacity sweep showed the current config is already
-   at the plateau (FINDINGS N5).
+5. Tuning is **not** a next action — a capacity sweep showed the plateau (FINDINGS N6).
+6. **Always** re-run `interpret.ablation_repeated` after adding a block; substitutability
+   means every prior ablation is stale.
 
 ## Compute budget
 733 units, **0.00 spent**. Plan (ADR-008): ~0 CPU ladder · ~5 embeddings · ~40 LLM

@@ -28,16 +28,38 @@ BLOCKS: dict[str, tuple[str, str, str]] = {
     "temporal": ("temporal", "v1", "session_id"),
     "lo_alignment": ("lo_alignment", "v1_lexical", "response_id"),
     "feedback": ("feedback", "v1", "response_id"),
+    "trajectory": ("trajectory", "v1", "response_id"),
+    # requires features.window_embeddings (GPU, once)
+    "content": ("content", "v1_k48", "response_id"),
 }
 
-# NOTE: `temporal` is deliberately EXCLUDED from the default stack.
-# Measured leave-one-block-out contribution is **-0.00049** — removing it makes the model
-# *better* (0.54355 -> 0.54306). Every one of its 18 features also had exactly zero split
-# gain. The block is kept registered (and its task still runs) because the negative result
-# is worth reporting: ASR-derived timing carries no outcome signal here once language is
-# modelled. See docs/FINDINGS.md N5. Pass blocks=[..., "temporal"] to re-include it.
-DEFAULT_BLOCKS = ["structural", "linguistic", "lo_alignment", "feedback"]
-ALL_BLOCKS = ["structural", "linguistic", "temporal", "lo_alignment", "feedback"]
+# Block membership is decided ONLY by `interpret.ablation_repeated` (paired leave-one-out
+# across 5 fold assignments, mean ± SD). Single-seed readings below ~1e-3 are noise at this
+# sample size and must not drive decisions — we made that mistake once with `temporal`.
+#
+# Measured paired deltas (positive = block contributes), 5 seeds:
+#   trajectory    +0.00226 ± 0.00011   5/5  <- strongest
+#   linguistic    +0.00174 ± 0.00025   5/5
+#   lo_alignment  -0.00030 ± 0.00024   5/5  <- REMOVED: significantly HURTS
+#   feedback      -0.00007 ± 0.00014   2/5  indistinguishable from zero
+#   structural    +0.00006 ± 0.00030   4/5  indistinguishable from zero
+#   temporal      +0.00005 ± 0.00047   4/5  indistinguishable from zero
+#
+# `lo_alignment` FEATURES are dropped (the only removal the evidence supports), but the
+# MODULE stays: it defines the sliding windows that trajectory/feedback/content are scoped
+# to, and its key-moment positions are a reported research finding. It may earn its place
+# back once the semantic backend replaces lexical matching.
+# Blocks that merely look redundant are deprioritized, NOT deleted — substitutability means
+# a block can become useful again when a neighbouring block improves.
+DEFAULT_BLOCKS = [
+    "structural",
+    "linguistic",
+    "temporal",
+    "feedback",
+    "trajectory",
+]
+# ALL_BLOCKS is what the ablation sweeps, so negative results stay visible in the report.
+ALL_BLOCKS = [*DEFAULT_BLOCKS[:3], "lo_alignment", *DEFAULT_BLOCKS[3:]]
 
 # Columns that are identifiers/labels, never features.
 NON_FEATURE = {
@@ -98,6 +120,9 @@ def block_of(column: str) -> str:
         ("lo_alignment", "lo_"),
         ("feedback", "fb_"),
         ("feedback", "fbs_"),
+        ("trajectory", "traj_"),
+        ("lo_position", "lopos_"),
+        ("content", "cont_"),
         ("embeddings", "emb_"),
     ):
         if column.startswith(prefix):

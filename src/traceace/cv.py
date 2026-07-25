@@ -31,8 +31,16 @@ from .tasks import task
 log = get_logger("cv")
 
 
-def folds_path() -> Path:
-    return interim_dir() / "folds.parquet"
+def folds_path(cv_seed: int | None = None) -> Path:
+    """Path for a fold assignment, namespaced by CV seed.
+
+    Repeated-seed CV re-shuffles the fold assignment to estimate how much of a measured
+    difference is just fold-assignment noise. Each seed therefore needs its own persisted
+    folds — and its own artifact namespace, per the clobbering bugs fixed earlier.
+    """
+    if cv_seed is None:
+        return interim_dir() / "folds.parquet"
+    return interim_dir() / f"folds_cv{cv_seed}.parquet"
 
 
 def assign_folds(
@@ -82,9 +90,11 @@ def _assert_no_group_overlap(df: pd.DataFrame, group_col: str) -> None:
     max_tier="cpu",
     description="generate session-grouped stratified folds once and persist them",
 )
-def build(force: bool = False, subsample: int | None = None) -> dict[str, Any]:
+def build(
+    force: bool = False, subsample: int | None = None, cv_seed: int | None = None
+) -> dict[str, Any]:
     cfg = get_config()
-    out = folds_path()
+    out = folds_path(cv_seed)
     if out.is_file() and not force and subsample is None:
         log.info("cv.build: cache hit %s (force=True to redo)", out)
         folds = pd.read_parquet(out)
@@ -97,17 +107,24 @@ def build(force: bool = False, subsample: int | None = None) -> dict[str, Any]:
         df = df[df["session_id"].isin(sessions)]
 
     n_splits = int(cfg.cv["n_splits"])
+    # cv_seed changes ONLY the fold assignment, not the model seed — that is what
+    # isolates fold-assignment noise from model-fitting noise.
+    fold_seed = cfg.seed if cv_seed is None else int(cv_seed)
     folds = assign_folds(
         df,
         n_splits=n_splits,
-        seed=cfg.seed,
+        seed=fold_seed,
         group_col=str(cfg.cv["group_col"]),
         label_col=str(cfg.cv["label_col"]),
     )
     keep = ["response_id", "session_id", LABEL_COL, "fold"]
     folds = folds[keep]
 
-    dest = out if subsample is None else interim_dir() / f"folds_sub{subsample}.parquet"
+    if subsample is None:
+        dest = out
+    else:
+        stem = "folds" if cv_seed is None else f"folds_cv{cv_seed}"
+        dest = interim_dir() / f"{stem}_sub{subsample}.parquet"
     write_parquet(folds, dest)
     log.info("cv.build: %d rows, %d folds -> %s", len(folds), n_splits, dest)
     return _fold_summary(folds, cached=False, output_path=str(dest))
@@ -129,11 +146,18 @@ def _fold_summary(folds: pd.DataFrame, cached: bool, output_path: str) -> dict[s
     }
 
 
-def load_folds(subsample: int | None = None) -> pd.DataFrame:
+def load_folds(subsample: int | None = None, cv_seed: int | None = None) -> pd.DataFrame:
     """Load persisted folds, raising a helpful error if cv.build has not run."""
-    path = folds_path() if subsample is None else interim_dir() / f"folds_sub{subsample}.parquet"
+    if subsample is None:
+        path = folds_path(cv_seed)
+    else:
+        stem = "folds" if cv_seed is None else f"folds_cv{cv_seed}"
+        path = interim_dir() / f"{stem}_sub{subsample}.parquet"
     if not path.is_file():
-        raise FileNotFoundError(f"{path} missing — run tasks.run('cv.build') first")
+        raise FileNotFoundError(
+            f"{path} missing — run tasks.run('cv.build'"
+            f"{'' if cv_seed is None else f', cv_seed={cv_seed}'}) first"
+        )
     return pd.read_parquet(path)
 
 

@@ -56,13 +56,16 @@ _TASK_MODULES = [
     "traceace.features.temporal",
     "traceace.features.lo_alignment",
     "traceace.features.feedback",
+    "traceace.features.trajectory",
     "traceace.features.embeddings",
     "traceace.features.window_embeddings",
+    "traceace.features.content",
     "traceace.annotate",
     "traceace.calibration",
     "traceace.ensemble",
     "traceace.evaluate",
     "traceace.interpret",
+    "traceace.experiments",
     "traceace.packaging.build_submission",
     "traceace.packaging.verify",
     "traceace.selftest",
@@ -305,19 +308,46 @@ def run(
     return result
 
 
+def _num(metrics: dict[str, Any], key: str) -> float | None:
+    """Read a metric as a float, tolerating richer shapes.
+
+    Repeated-seed tasks report a *distribution* rather than a scalar, so a metric may be a
+    dict like ``{"mean": ..., "sd": ...}``. Formatting that with ``:.5f`` raised a
+    TypeError and killed the run's summary **after the task had already succeeded** —
+    losing the console report of a multi-minute job. Never let presentation break a result.
+    """
+    v = metrics.get(key)
+    if isinstance(v, int | float) and not isinstance(v, bool):
+        return float(v)
+    if isinstance(v, dict):
+        m = v.get("mean")
+        if isinstance(m, int | float):
+            return float(m)
+    return None
+
+
 def _pick_headline(metrics: dict[str, Any]) -> str:
     """Prefer log loss + delta vs baseline in the summary line."""
     parts = []
     for key in ("logloss", "log_loss", "cv_logloss"):
-        if key in metrics:
-            parts.append(f"logloss={metrics[key]:.5f}")
+        v = _num(metrics, key)
+        if v is not None:
+            parts.append(f"logloss={v:.5f}")
             break
     for key in ("delta_vs_lo_only", "delta_logloss"):
-        if key in metrics:
-            parts.append(f"Δ_vs_lo_only={metrics[key]:+.5f}")
+        v = _num(metrics, key)
+        if v is not None:
+            sd = metrics.get(key, {})
+            sd_s = (
+                f" ± {sd['sd']:.5f}"
+                if isinstance(sd, dict) and isinstance(sd.get("sd"), int | float)
+                else ""
+            )
+            parts.append(f"Δ_vs_lo_only={v:+.5f}{sd_s}")
             break
-    if "auc" in metrics:
-        parts.append(f"auc={metrics['auc']:.4f}")
+    v = _num(metrics, "auc")
+    if v is not None:
+        parts.append(f"auc={v:.4f}")
     return " · ".join(parts)
 
 

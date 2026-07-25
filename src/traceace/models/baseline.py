@@ -33,9 +33,9 @@ log = get_logger("baseline")
 LO_COL = "learning_objective_id"
 
 
-def _train_with_folds(subsample: int | None) -> pd.DataFrame:
+def _train_with_folds(subsample: int | None, cv_seed: int | None = None) -> pd.DataFrame:
     """Join training features with persisted folds."""
-    folds = load_folds(subsample=subsample)
+    folds = load_folds(subsample=subsample, cv_seed=cv_seed)
     feats = load_train()
     df = folds.merge(
         feats.drop(columns=[c for c in (LABEL_COL,) if c in feats.columns]),
@@ -51,8 +51,10 @@ def _train_with_folds(subsample: int | None) -> pd.DataFrame:
     max_tier="cpu",
     description="global base rate — the log loss floor",
 )
-def prior(force: bool = False, subsample: int | None = None) -> dict[str, Any]:
-    df = _train_with_folds(subsample)
+def prior(
+    force: bool = False, subsample: int | None = None, cv_seed: int | None = None
+) -> dict[str, Any]:
+    df = _train_with_folds(subsample, cv_seed)
     df = df.copy()
     df["pred"] = np.nan
 
@@ -79,6 +81,7 @@ def lo_only(
     force: bool = False,
     subsample: int | None = None,
     smoothing: float = 20.0,
+    cv_seed: int | None = None,
 ) -> dict[str, Any]:
     """Smoothed per-LO mean correctness, fit within folds, using no transcript data.
 
@@ -86,7 +89,7 @@ def lo_only(
     ``(sum + m*global) / (n + m)``. Rare LOs (the measured minimum is 1 response) get
     pulled to the global rate rather than predicting 0 or 1 and exploding log loss.
     """
-    df = _train_with_folds(subsample)
+    df = _train_with_folds(subsample, cv_seed)
     if LO_COL not in df.columns:
         raise KeyError(f"{LO_COL} missing from training features")
     df = df.copy()
@@ -106,8 +109,9 @@ def lo_only(
         "baseline.lo_only",
         df[["response_id", "session_id", LABEL_COL, "pred"]],
         subsample=subsample,
+        cv_seed=cv_seed,
     )
-    res = score_frame(df, "baseline.lo_only", subsample=subsample)
+    res = score_frame(df, "baseline.lo_only", subsample=subsample, cv_seed=cv_seed)
     res["smoothing"] = smoothing
     log.info("baseline.lo_only: logloss=%.5f  <-- THE BAR", res["logloss"])
     return res

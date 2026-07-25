@@ -125,6 +125,7 @@ def train(
     seed: int | None = None,
     include_lo_prior: bool = True,
     lo_smoothing: float = 20.0,
+    cv_seed: int | None = None,
 ) -> dict[str, Any]:
     import lightgbm as lgb
 
@@ -134,7 +135,7 @@ def train(
     seed = int(seed if seed is not None else cfg.seed)
     blocks = list(blocks or DEFAULT_BLOCKS)
 
-    folds = load_folds(subsample=subsample)
+    folds = load_folds(subsample=subsample, cv_seed=cv_seed)
     feats = load_train_features()
     base = folds.merge(
         feats[["response_id", "session_id", "learning_objective_id"]],
@@ -196,7 +197,7 @@ def train(
         importances.append(
             pd.Series(booster.feature_importance("gain"), index=feat_cols, dtype=float)
         )
-        mdir = experiment_dir(experiment, subsample)
+        mdir = experiment_dir(experiment, subsample, cv_seed)
         mdir.mkdir(parents=True, exist_ok=True)
         booster.save_model(str(mdir / f"fold{k}.txt"), num_iteration=booster.best_iteration)
 
@@ -206,7 +207,7 @@ def train(
     for c in ("struct_n_utterances", "struct_student_talk_ratio"):
         if c in frame.columns:
             oof_cols.append(c)
-    save_oof(experiment, frame[oof_cols], subsample=subsample)
+    save_oof(experiment, frame[oof_cols], subsample=subsample, cv_seed=cv_seed)
 
     # cross-fold importance with dispersion (for interpret.report)
     imp = pd.concat(importances, axis=1)
@@ -220,10 +221,10 @@ def train(
             "gain_max": imp.max(axis=1).to_numpy(),
         }
     ).sort_values("gain_mean", ascending=False)
-    imp_path = experiment_dir(experiment, subsample) / "importance.parquet"
+    imp_path = experiment_dir(experiment, subsample, cv_seed) / "importance.parquet"
     write_parquet(imp_summary, imp_path)
 
-    res = score_frame(frame, experiment, subsample=subsample)
+    res = score_frame(frame, experiment, subsample=subsample, cv_seed=cv_seed)
     res.update(
         {
             "blocks": blocks,

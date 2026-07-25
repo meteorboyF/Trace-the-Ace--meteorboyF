@@ -118,17 +118,18 @@ generalizability caveat.
 improvement is **small**, and it only appears if topic difficulty is modelled *alongside*
 the transcript rather than in competition with it.
 
-**Evidence.** Full 5-fold session-grouped cross-validation on all 35,072 responses:
+**Evidence.** 5-fold session-grouped CV on all 35,072 responses, **repeated over 5 independent
+fold assignments** — mean ± SD:
 
 | Model | CV log loss | AUC | Δ vs `lo_only` |
 |---|---|---|---|
 | `baseline.prior` (global base rate) | 0.60876 | 0.500 | +0.0569 |
-| `baseline.lo_only` (topic only, **no transcript**) | **0.55184** | 0.707 | — (the bar) |
+| `baseline.lo_only` (topic only, **no transcript**) | **0.55220 ± 0.00022** | 0.707 | — (the bar) |
 | GBDT, **transcript features only** | 0.59312 | 0.609 | **+0.0413 (worse)** |
-| GBDT, transcript + topic prior (4 blocks) | 0.54306 | 0.7223 | −0.00878 |
-| **+ Platt calibration (current best)** | **0.543005** | **0.7223** | **−0.00883 (better)** |
+| GBDT, transcript + topic prior | **0.54088 ± 0.00055** | **0.72576 ± 0.00085** | **−0.01132 ± 0.00066** |
 
-`[runs/gbdt/model_gbdt.json]`, `[runs/evaluate/model_gbdt.json]`, `[docs/EXPERIMENTS.md]`
+The improvement's 95% CI is **[−0.01191, −0.01074]**, excluding zero on all 5 fold assignments.
+`[runs/repeated/score.json]`, `[docs/EXPERIMENTS.md]`
 
 **Why it matters for practice — this is the paper's methodological warning.** A transcript-only
 model *looks* respectable in isolation (AUC 0.609) yet is **decisively worse than a lookup
@@ -173,18 +174,36 @@ informative.
 **Claim.** The feature block with the highest model importance is **not** the block whose
 removal hurts most. Reporting importance alone would have produced a wrong conclusion.
 
-**Evidence.** Total LightGBM gain by block versus leave-one-block-out marginal contribution
-(positive = removing the block made log loss worse, i.e. the block contributed):
+**Evidence.** **Paired** leave-one-block-out across 5 fold assignments (positive = removing
+the block made log loss worse, i.e. the block contributed). Pairing within each fold
+assignment cancels the shared noise, which is what makes a 2×10⁻⁴ effect measurable at all:
 
-| Block | Gain importance | Marginal contribution | Rank agreement |
-|---|---|---|---|
-| LO-alignment | **51,822** (1st) | +0.00059 (2nd) | ✗ |
-| Linguistic | 27,822 (2nd) | **+0.00192 (1st)** | ✗ |
-| Structural | 13,721 (3rd) | +0.00028 (4th) | ✗ |
-| Feedback | 11,270 (4th) | +0.00046 (3rd) | ✗ |
-| Temporal | (excluded) | **−0.00049 (harmful)** | — |
+| Block | Marginal Δ (mean ± SD) | 95% CI | Seeds agreeing | Verdict |
+|---|---|---|---|---|
+| **trajectory** | **+0.00226 ± 0.00011** | [+0.00216, +0.00236] | 5/5 | ✅ real |
+| **linguistic** | **+0.00174 ± 0.00025** | [+0.00152, +0.00196] | 5/5 | ✅ real |
+| lo_alignment | **−0.00030 ± 0.00024** | [−0.00051, −0.00009] | 5/5 | ⚠️ significantly *hurts* |
+| feedback | −0.00007 ± 0.00014 | [−0.00020, +0.00005] | 2/5 | ✗ indistinguishable from 0 |
+| structural | +0.00006 ± 0.00030 | [−0.00021, +0.00033] | 4/5 | ✗ indistinguishable from 0 |
+| temporal | +0.00005 ± 0.00047 | [−0.00036, +0.00045] | 4/5 | ✗ indistinguishable from 0 |
 
-`[runs/interpret/ablation.json]`, `[artifacts/figures/importance_model_gbdt.pdf]`
+`[runs/interpret/ablation_repeated.json]`, `[artifacts/figures/importance_model_gbdt.pdf]`
+
+**Three things this table changes.** (1) Only **two of six** families are distinguishable from
+zero — the rest are within noise, and any ranking among them is unfounded. (2) `lo_alignment`
+is *significantly negative* once `trajectory` is present: the two are scoped to the same
+windows, so the lexical similarity scalars become redundant noise. Its features are dropped
+(the only removal our evidence supports) while the module stays, because it defines the
+windows the other blocks are scoped to. (3) Gain importance ranks `lo_alignment` **first** at
+51,822 gain — the block that measurably *hurts*. Importance and contribution disagree at
+essentially every rank.
+
+**Why it matters for practice.** Gain importance measures how often a model *used* a feature,
+which under correlated features rewards whichever variant a tree split on first. Marginal
+contribution measures what is *lost* without it. Our blocks are heavily correlated (talk ratio
+appears in structural, in linguistic, and inside the topic window), so the two diverge
+sharply. **Report ablations with error bars, not importance charts**, whenever the claim is
+"feature family X matters."
 
 **Why it matters for practice.** Gain importance measures how often a model *used* a feature,
 which under correlated features rewards whichever correlated variant the tree happened to
@@ -233,6 +252,57 @@ cannot be known before the lesson happens.
 **Caveat (important).** This is correlational. Tutors correct *because* a student is
 struggling, so a high corrective ratio is plausibly a **response to** low mastery rather than
 a cause of it. Nothing here licenses telling tutors to correct less.
+
+---
+
+---
+
+### F8. Order is the strongest single signal — aggregates throw it away
+
+**Claim.** *When* things happened inside the topic-relevant stretch of a lesson predicts
+outcomes better than any aggregate of what happened. This is the largest measured effect in
+the study.
+
+**Evidence.** A block of order-sensitive features — student utterance-length trend, correction
+and affirmation rates in the first vs middle vs last third, where the final corrective turn
+falls relative to the window end, whether the closing exchange was affirming, and the longest
+run of unaffirmed student attempts — contributes **+0.00226 ± 0.00011** log loss, agreeing on
+**5/5** fold assignments and with the tightest interval of any block. Adding it moved the
+headline from 0.54344 ± 0.00041 to **0.54088 ± 0.00055** and the margin over the topic
+baseline from −0.00876 to **−0.01132**, a 29% improvement in what the transcript contributes.
+`[runs/interpret/ablation_repeated.json]`, `[src/traceace/features/trajectory.py]`
+
+**Why it matters for practice.** Every aggregate statistic is order-blind: a student who
+struggles early and then masters the topic, and one whose fluency degrades into confusion,
+produce **identical** means, rates and ratios — and opposite outcomes. Averaging over a lesson
+destroys exactly the information that distinguishes learning from not-learning. Concretely,
+"did this episode end on an affirmation or an unresolved correction?" is cheap to compute, has
+no ML in it, and is more informative than the talk-ratio metrics tutoring platforms report.
+
+---
+
+### F9. Objectives compete for a fixed lesson budget, and that competition is visible
+
+**Claim.** In a fixed-length lesson covering several objectives, *how many other objectives
+were taught* is one of the strongest individual predictors of whether a given one was learned.
+
+**Evidence.** `lopos_n_competing_los` — a plain count of the objectives assessed in the same
+lesson — is the **second-highest-gain feature in the model**, behind only the topic-difficulty
+prior itself. Lessons run ~43 minutes and average 1.54 assessed objectives (max 10), so time
+is genuinely rationed. Companion features cover the objective's ordinal position, its share of
+the lesson's utterances and minutes, how interleaved it was with others, and how much lesson
+remained after it. `[artifacts/models/model_gbdt/importance.parquet]`,
+`[src/traceace/features/trajectory.py]`
+
+**Why it matters for practice.** This is an actionable, platform-independent finding about
+**curriculum pacing** rather than about any individual student or tutor: covering more
+objectives in one fixed session is associated with different outcomes per objective. It needs
+no transcript modelling to compute — a scheduling table suffices — and it generalizes to any
+tutoring setting where a session covers multiple topics.
+
+**Caveat.** Correlational, and confounded in an obvious direction: tutors may cover more
+objectives *because* a student is progressing quickly. We report the association, not a
+recommendation to teach fewer objectives.
 
 ---
 
@@ -373,31 +443,41 @@ the computational cost, and keeps the generative model entirely out of the predi
 *Failed approaches are findings. Reporting them is what the Rigor criterion rewards, and each
 of these would otherwise cost another group the same wasted effort.*
 
-### N1. Timing features carry no outcome signal — and actively hurt
-The temporal block (18 features: inter-utterance gaps, student response latency, pacing
-drift, all with robust statistics) has a marginal contribution of **−0.00049** — removing it
-makes the model *better* (0.54355 → 0.54306). It is excluded from the default stack.
+### N1. Timing features carry no *measurable* signal — but the honest verdict is "unmeasurable"
+The temporal block (18 features: inter-utterance gaps, response latency, pacing drift, robust
+statistics throughout) contributes **+0.00005 ± 0.00047** across 5 fold assignments — squarely
+indistinguishable from zero, with seeds splitting 4/5 on sign.
 
-We consider this a genuine finding rather than an implementation failure, because the
-features are well-formed: `temp_gap_trimmean` has 19,987 distinct values with sensible
-spread (median 7.2 s, IQR 11 s), and sessions cluster tightly at ~43 minutes so pacing is
-comparable across lessons. Two plausible explanations: (a) ASR segmentation timestamps
-reflect the *transcription pipeline's* chunking as much as real conversational timing, and
-(b) whatever pedagogical signal timing carries is already captured by utterance-length and
-turn-taking features.
-**Implication for other groups:** response latency is an appealing "struggle" proxy and is
-cheap to compute, but on ASR-derived transcripts it did not survive contact with an ablation.
-Verify it on your own data before building on it. `[runs/interpret/ablation.json]`
+The features are well-formed, so this is not an implementation failure: `temp_gap_trimmean`
+has 19,987 distinct values with sensible spread (median 7.2 s, IQR 11 s), and lessons cluster
+tightly at ~43 minutes so pacing is comparable. Two plausible explanations: ASR segmentation
+timestamps partly reflect the *transcription pipeline's* chunking rather than conversational
+timing, and whatever pedagogical signal timing carries may already be captured by
+utterance-length and turn-taking features.
 
-### N2. Calibration gains are real but negligible here
-Platt scaling improves log loss by **+0.000058** (0.543063 → 0.543005) and roughly halves
-expected calibration error (0.0056 → 0.0033). Isotonic regression is clearly *worse*
-(0.545318) despite the best ECE (0.0024) — it over-fits the bin edges.
+**We keep the block.** An effect of zero ± 5×10⁻⁴ is not evidence of *absence*; it means the
+experiment cannot resolve it. The block is free to compute and may become informative once
+neighbouring blocks change (see N7 on substitutability).
+**Implication for other groups:** response latency is an appealing, cheap "struggle" proxy,
+but on ASR-derived transcripts it did not survive an ablation with error bars. Measure it on
+your own data before building on it — and report the interval, not the point estimate.
+`[runs/interpret/ablation_repeated.json]`
+
+### N2. Calibration is kept for CALIBRATION, not for score — the log-loss gain is noise
+Platt scaling changes log loss by **+0.000058** (0.543063 → 0.543005). We explicitly **do not
+count that as a score improvement**: it is an order of magnitude below the repeated-seed noise
+floor (paired SD ≈ 5×10⁻⁴), i.e. indistinguishable from zero.
+
+The justification for keeping it is the **calibration quality itself**: expected calibration
+error roughly halves, **0.0056 → 0.0033**. On a proper scoring rule the point is honest
+probabilities, and a tutoring system acting on "this student has a 70% chance" should be right
+about 70% of the time. Isotonic regression achieves the best ECE (0.0024) but a clearly worse
+log loss (0.545318) — it over-fits bin edges — so Platt is the pick.
 **Implication:** the organizers correctly note log loss "can often be improved with
 calibration", but a cross-validated GBDT trained *directly* on log loss is already
-near-calibrated, so the headroom is ~0.0001, not ~0.01. Worth checking (it is free), not
-worth engineering around. Our comparison uses an inner cross-fold loop, so the gain is not an
-artifact of fitting and evaluating the calibrator on the same rows.
+near-calibrated. Check it (it is free); do not budget score gains for it. The comparison uses
+an inner cross-fold loop, so even this small number is not an artifact of fitting and
+evaluating the calibrator on the same rows.
 `[runs/calibration/model_gbdt.json]`
 
 ### N3. A transcript-only model loses to a topic-difficulty lookup table
@@ -421,14 +501,41 @@ Rigor means recording our own errors, not only the model's.
    **The disfluency hypothesis is supported, not refuted.** The lesson: never read feature
    importance without first checking the model actually converged.
 
-### N5. Model capacity is not the bottleneck
+### N5. Most of our feature families are unmeasurable, not useless — the noise floor is the story
+Of six feature families, only **two** (trajectory, linguistic) have a marginal contribution
+distinguishable from zero. Three (feedback, structural, temporal) sit inside ±3×10⁻⁴ with
+seeds splitting on sign, and one (lo_alignment) is significantly *negative*.
+
+The noise floor is the reason. At 35,072 rows the paired log-loss difference has SD ≈5×10⁻⁴,
+and the headline score varies by **0.00105** across five fold assignments — larger than most
+individual family effects. We learned this the hard way: we excluded the temporal block on a
+single-seed reading of −0.00049 and had to reverse it, and a single-seed run had also credited
+`feedback` with +0.00046 when the repeated estimate is −0.00007 ± 0.00014.
+
+**Implication:** in this domain, report repeated-seed intervals on every comparison. A single
+fold assignment is one draw from a distribution, and differences below ~10⁻³ at this sample
+size are not measurements. `[runs/repeated/score.json]`, `[runs/interpret/ablation_repeated.json]`
+
+### N7. The blocks are substitutes, so "redundant" is contextual, not permanent
+`lo_alignment` measured **+0.00059** when it was the only topic-conditioned block and
+**−0.00030 ± 0.00024** once `trajectory` — scoped to the same windows — was added. Nothing
+about the block changed; its neighbourhood did. Similarly, LO-alignment alone (0.54921) and
+structural alone (0.54878) score almost identically when each is paired with the topic prior,
+despite LO-alignment absorbing ~4× the gain when both are present.
+
+**Implication:** a family that looks redundant is redundant *given the current stack*. We
+therefore deprioritize rather than delete, and re-run the ablation after every addition. Any
+paper reporting one ablation over one feature set is reporting a snapshot, not a property of
+the features.
+
+### N6. Model capacity is not the bottleneck
 Sweeping LightGBM capacity made things uniformly worse: deeper trees (127 leaves,
 `min_data_in_leaf=20`) gave 0.54657, deeper + slower (lr 0.01) 0.54515, no feature
 subsampling 0.54426 — versus 0.54306 for the tuned-by-default configuration. The plateau is a
 **signal ceiling, not an optimization failure**, which is why effort has gone into new feature
 families rather than hyperparameters.
 
-### N6. An OOF file-naming bug silently inverted the headline result
+### N8. An OOF file-naming bug silently inverted the headline result
 `save_oof()` keyed files by experiment name alone, so a 400-session self-test overwrote the
 full-data `baseline.lo_only` OOF. Every subsequent `delta_vs_lo_only` was then computed
 against a 400-session baseline (0.53881) instead of the real one (0.55184) — flipping the

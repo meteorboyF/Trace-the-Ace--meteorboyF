@@ -672,3 +672,247 @@ def feedback_features(df: pd.DataFrame, prefix: str = "fb_") -> dict[str, float]
             streak = 0
     feats[f"{P}max_correction_streak"] = float(best)
     return feats
+
+
+# ---------------------------------------------------------------------------
+# Trajectory block — ORDER-sensitive features over the LO-aligned window.
+# ---------------------------------------------------------------------------
+# Every other block is an aggregate, and aggregates are order-blind: a student who
+# struggles early then masters the topic, and one whose fluency degrades into confusion,
+# produce *identical* means, rates and ratios. Those two students have opposite outcomes.
+#
+# So these features are explicitly about SHAPE over time within the topic-relevant window:
+# trends, first-vs-last thirds, where the final correction falls, and run lengths.
+
+
+def _linreg_slope(y: np.ndarray) -> tuple[float, float]:
+    """Least-squares slope of y over a normalized 0..1 index, plus R^2."""
+    y = np.asarray(y, dtype=float)
+    y = y[np.isfinite(y)]
+    if y.size < 3:
+        return 0.0, 0.0
+    x = np.linspace(0.0, 1.0, y.size)
+    xm, ym = x.mean(), y.mean()
+    denom = float(((x - xm) ** 2).sum())
+    if denom == 0:
+        return 0.0, 0.0
+    slope = float(((x - xm) * (y - ym)).sum() / denom)
+    pred = ym + slope * (x - xm)
+    ss_res = float(((y - pred) ** 2).sum())
+    ss_tot = float(((y - ym) ** 2).sum())
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    return slope, float(r2)
+
+
+def _thirds(n: int) -> list[tuple[int, int]]:
+    if n <= 0:
+        return []
+    a, b = n // 3, (2 * n) // 3
+    return [(0, max(a, 1)), (a, max(b, a + 1)), (b, n)]
+
+
+def trajectory_features(df: pd.DataFrame, prefix: str = "traj_") -> dict[str, float]:
+    """Order-sensitive features over an (already scoped) stretch of dialogue."""
+    P = prefix
+    n = len(df)
+    roles = df["role"].to_numpy() if n else np.array([])
+    texts = df["content"].astype(str).to_numpy() if n else np.array([])
+
+    feats: dict[str, float] = {}
+    labels = [_classify_tutor_turn(t) if r == "tutor" else None for r, t in zip(roles, texts)]
+
+    # --- student utterance-length trend across the window -------------------
+    stu_mask = roles == "student" if n else np.array([], dtype=bool)
+    stu_len = np.array([len(t) for t in texts[stu_mask]], dtype=float) if n else np.array([])
+    slope, r2 = _linreg_slope(stu_len)
+    feats[f"{P}student_len_slope"] = slope
+    feats[f"{P}student_len_r2"] = r2
+    feats[f"{P}n_student_turns"] = float(stu_len.size)
+
+    # --- first / middle / last third -----------------------------------------
+    # Rates computed per third so "struggled early, recovered" is distinguishable from
+    # "started fine, fell apart" — identical in any whole-window average.
+    for i, (s, e) in enumerate(_thirds(n), start=1):
+        seg_labels = labels[s:e]
+        seg_roles = roles[s:e] if n else np.array([])
+        n_tutor = int((seg_roles == "tutor").sum()) if n else 0
+        n_corr = sum(1 for x in seg_labels if x == "correct")
+        n_aff = sum(1 for x in seg_labels if x == "affirm")
+        feats[f"{P}correct_rate_t{i}"] = safe_div(n_corr, n_tutor)
+        feats[f"{P}affirm_rate_t{i}"] = safe_div(n_aff, n_tutor)
+        seg_stu = [len(t) for t, r in zip(texts[s:e], seg_roles) if r == "student"] if n else []
+        feats[f"{P}mean_student_len_t{i}"] = safe_div(sum(seg_stu), len(seg_stu))
+
+    # deltas: last third minus first third — the direction of travel
+    feats[f"{P}correct_rate_delta"] = feats.get(f"{P}correct_rate_t3", 0.0) - feats.get(
+        f"{P}correct_rate_t1", 0.0
+    )
+    feats[f"{P}affirm_rate_delta"] = feats.get(f"{P}affirm_rate_t3", 0.0) - feats.get(
+        f"{P}affirm_rate_t1", 0.0
+    )
+    feats[f"{P}student_len_delta"] = feats.get(f"{P}mean_student_len_t3", 0.0) - feats.get(
+        f"{P}mean_student_len_t1", 0.0
+    )
+
+    # --- where does the LAST corrective turn fall, relative to window end? ---
+    last_corr = -1
+    last_aff = -1
+    for i, lab in enumerate(labels):
+        if lab == "correct":
+            last_corr = i
+        elif lab == "affirm":
+            last_aff = i
+    denom = max(n - 1, 1)
+    feats[f"{P}last_correction_from_end"] = (
+        float((n - 1 - last_corr) / denom) if last_corr >= 0 else 1.0
+    )
+    feats[f"{P}last_affirm_from_end"] = float((n - 1 - last_aff) / denom) if last_aff >= 0 else 1.0
+
+    # --- how did the window END? ---------------------------------------------
+    # The closing exchange is the tutor's last read on whether the student has it.
+    feats[f"{P}ends_on_affirm"] = 1.0 if (last_aff >= 0 and last_aff > last_corr) else 0.0
+    feats[f"{P}ends_on_correction"] = 1.0 if (last_corr >= 0 and last_corr > last_aff) else 0.0
+
+    # last student->tutor exchange in the window
+    final_exchange = 0.0
+    for i in range(n - 1, 0, -1):
+        if roles[i] == "tutor" and roles[i - 1] == "student":
+            final_exchange = {"affirm": 1.0, "correct": -1.0}.get(labels[i] or "", 0.0)
+            break
+    feats[f"{P}final_exchange_valence"] = final_exchange
+
+    # --- run lengths: longest streak of student attempts with no affirmation --
+    streak = best = 0
+    for r, lab in zip(roles, labels):
+        if r == "student":
+            streak += 1
+        elif lab == "affirm":
+            best = max(best, streak)
+            streak = 0
+    best = max(best, streak)
+    feats[f"{P}max_unaffirmed_student_run"] = float(best)
+
+    # longest consecutive corrective streak, and consecutive affirm streak
+    cs = cbest = as_ = abest = 0
+    for lab in labels:
+        if lab == "correct":
+            cs += 1
+            cbest = max(cbest, cs)
+            as_ = 0
+        elif lab == "affirm":
+            as_ += 1
+            abest = max(abest, as_)
+            cs = 0
+    feats[f"{P}max_correction_run"] = float(cbest)
+    feats[f"{P}max_affirm_run"] = float(abest)
+    return feats
+
+
+# ---------------------------------------------------------------------------
+# LO-position block — how a fixed lesson budget is divided between objectives.
+# ---------------------------------------------------------------------------
+# Sessions run ~43 minutes and average 1.54 assessed objectives, so objectives
+# COMPETE for a fixed time budget. An objective that got the last four minutes of a
+# lesson shared with two others is in a very different position from one that had the
+# whole hour. None of that is visible to any block that looks only at content.
+#
+# These features are also a directly reportable finding about time allocation in
+# multi-objective tutoring, independent of the model.
+
+
+def lo_position_features(
+    lo_window_spans: list[tuple[int, int]],
+    all_lo_spans: list[list[tuple[int, int]]],
+    n_utterances: int,
+    t_seconds: np.ndarray,
+    prefix: str = "lopos_",
+) -> dict[str, float]:
+    """Positional/allocation features for one objective within its session.
+
+    Parameters
+    ----------
+    lo_window_spans:
+        Top-k window spans for THIS objective (already merged, chronological).
+    all_lo_spans:
+        Top-k spans for EVERY objective assessed in this session, including this one —
+        needed to compute ordinal position and competition.
+    n_utterances / t_seconds:
+        Session length in utterances, and per-utterance elapsed seconds (may be NaN).
+    """
+    P = prefix
+    n = max(n_utterances, 1)
+    feats: dict[str, float] = {f"{P}n_competing_los": float(len(all_lo_spans))}
+
+    if not lo_window_spans:
+        feats.update(
+            {
+                f"{P}centre_pos": 0.5,
+                f"{P}start_pos": 0.5,
+                f"{P}end_pos": 0.5,
+                f"{P}utt_share": 0.0,
+                f"{P}minute_share": 0.0,
+                f"{P}gap_to_session_end_utt": 0.0,
+                f"{P}gap_to_session_end_s": 0.0,
+                f"{P}ordinal": 0.0,
+                f"{P}ordinal_frac": 0.0,
+                f"{P}duration_s": 0.0,
+                f"{P}overlap_with_others": 0.0,
+            }
+        )
+        return feats
+
+    start = min(s for s, _ in lo_window_spans)
+    end = max(e for _, e in lo_window_spans)
+    centre = (start + end) / 2.0
+
+    feats[f"{P}start_pos"] = start / n
+    feats[f"{P}end_pos"] = end / n
+    feats[f"{P}centre_pos"] = centre / n
+
+    # share of the lesson's utterances devoted to this objective
+    covered = sum(e - s for s, e in lo_window_spans)
+    feats[f"{P}utt_share"] = safe_div(covered, n)
+
+    # --- ordinal position among the session's objectives --------------------
+    centres = []
+    for spans in all_lo_spans:
+        if spans:
+            c = (min(s for s, _ in spans) + max(e for _, e in spans)) / 2.0
+            centres.append(c)
+    centres_sorted = sorted(centres)
+    ordinal = sum(1 for c in centres_sorted if c < centre)
+    feats[f"{P}ordinal"] = float(ordinal)
+    feats[f"{P}ordinal_frac"] = safe_div(ordinal, max(len(centres_sorted) - 1, 1))
+
+    # --- how much does this objective's region overlap the others? ----------
+    # High overlap => the objectives were taught interleaved rather than in blocks.
+    others = [sp for sp in all_lo_spans if sp is not lo_window_spans]
+    overlap = 0
+    for sp in others:
+        for s2, e2 in sp:
+            for s1, e1 in lo_window_spans:
+                overlap += max(0, min(e1, e2) - max(s1, s2))
+    feats[f"{P}overlap_with_others"] = safe_div(overlap, max(covered, 1))
+
+    # --- clock-time features -------------------------------------------------
+    t = np.asarray(t_seconds, dtype=float)
+    finite = np.isfinite(t)
+    if finite.any():
+        t_end = float(np.nanmax(t))
+        t_start = float(np.nanmin(t))
+        total_s = max(t_end - t_start, 1.0)
+        si = min(max(int(start), 0), len(t) - 1)
+        ei = min(max(int(end) - 1, 0), len(t) - 1)
+        w_start = t[si] if np.isfinite(t[si]) else t_start
+        w_end = t[ei] if np.isfinite(t[ei]) else t_end
+        feats[f"{P}duration_s"] = float(max(w_end - w_start, 0.0))
+        feats[f"{P}minute_share"] = safe_div(float(max(w_end - w_start, 0.0)), total_s)
+        # An objective taught right before the bell has no time for consolidation.
+        feats[f"{P}gap_to_session_end_s"] = float(max(t_end - w_end, 0.0))
+    else:
+        feats[f"{P}duration_s"] = 0.0
+        feats[f"{P}minute_share"] = 0.0
+        feats[f"{P}gap_to_session_end_s"] = 0.0
+
+    feats[f"{P}gap_to_session_end_utt"] = safe_div(n - end, n)
+    return feats
