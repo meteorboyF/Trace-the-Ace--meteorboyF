@@ -19,10 +19,25 @@ submission/
 *.onnx
 *.joblib
 *.pkl
-train_*
-test_*
+# Competition data files. These are DATA-file patterns, so they are scoped to data
+# extensions rather than bare prefixes.
+#
+# CAUTION: a bare `test_*` here also matches `tests/test_*.py`. That silently kept every
+# test file out of the repo, and CI then collected zero tests and failed with exit code 5
+# while every gate passed locally. Keep these extension-scoped.
+train_*.csv
+train_*.zip
+train_*.parquet
+test_*.csv
+test_*.zip
+test_*.parquet
 submission_format*
 submission.csv
+
+# Belt-and-braces: the data lives in these directories anyway (already ignored above),
+# and the pre-commit hook blocks the data patterns independently.
+/train_transcripts/
+/test_transcripts/
 
 # Python
 __pycache__/
