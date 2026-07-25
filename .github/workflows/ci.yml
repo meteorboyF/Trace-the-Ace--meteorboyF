@@ -1,0 +1,45 @@
+name: CI
+
+# Lint + type-check + tests on every push and PR.
+# NOTE: the competition data is NOT available here and must never be. Every test
+# builds its own synthetic fixtures (see tests/conftest.py).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12 (matches the competition runtime)
+        run: uv python install 3.12
+
+      - name: Create venv and install
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python -e ".[dev]"
+
+      - name: Ruff (lint)
+        run: .venv/bin/ruff check .
+
+      - name: Ruff (format check)
+        run: .venv/bin/ruff format --check .
+
+      - name: Mypy
+        run: .venv/bin/mypy
+
+      - name: Pytest
+        run: .venv/bin/pytest -q
+
+      - name: Guard — no competition data committed
+        run: .venv/bin/python tools/precommit_guard.py $(git ls-files)
