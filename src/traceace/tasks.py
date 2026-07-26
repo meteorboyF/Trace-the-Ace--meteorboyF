@@ -66,6 +66,7 @@ _TASK_MODULES = [
     "traceace.evaluate",
     "traceace.interpret",
     "traceace.experiments",
+    "traceace.unseen_lo",
     "traceace.packaging.build_submission",
     "traceace.packaging.verify",
     "traceace.selftest",

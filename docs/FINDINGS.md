@@ -297,6 +297,38 @@ features — which dialogue certainly is — that claim does not follow.
 
 ---
 
+### F7c. The transcript signal survives when topic difficulty is unavailable
+
+**Claim.** On learning objectives the model has never seen, the topic-difficulty lookup is
+useless by construction — and the transcript features keep working.
+
+**Evidence.** The organizers confirmed that not every objective in the test set appears in
+training. Holding out 25% of objectives entirely (moving whole sessions to validation so no
+transcript is split), across 5 draws scoring ~8,500 rows each:
+
+| | log loss |
+|---|---|
+| model on unseen objectives | 0.59178 ± 0.01143 |
+| prior — which is also exactly what `lo_only` degenerates to | 0.59982 ± 0.01224 |
+| **transcript gain** | **−0.00804 ± 0.00260** (distinguishable from zero) |
+
+Compare the seen-objective regime: gain −0.01132 ± 0.00066. The transcript retains ~71% of its
+contribution when the topic prior is removed entirely.
+`[runs/unseen_lo/stress.json]`, `[src/traceace/unseen_lo.py]`
+
+**Why it matters for practice.** This is the sharpest available test of whether a model has
+learned about *tutoring* or merely about *topic difficulty* — and it is trivially runnable on
+any knowledge-tracing dataset. A model whose advantage vanishes on unseen topics has learned a
+lookup table; ours does not. We recommend it as a standard robustness check, reported
+alongside the headline score.
+
+**Honest caveat.** The absolute score is much worse (0.592 vs 0.541) because the topic prior
+genuinely carries most of the predictive weight. The *true* leaderboard score sits somewhere
+between our two numbers, at a mixing ratio only the organizers know. We report both rather
+than a single figure that would be optimistic.
+
+---
+
 ### F8. Order is the strongest single signal — aggregates throw it away
 
 **Claim.** *When* things happened inside the topic-relevant stretch of a lesson predicts
@@ -460,6 +492,25 @@ the computational cost, and keeps the generative model entirely out of the predi
   dialogue signal is largely absent, and predictions fall back toward topic difficulty), or
   when the learning objective is rare in training (some objectives have a single example).
   Per-slice performance tables quantify exactly where this happens.
+
+### The largest known threat to generalizability: the test set is not one corpus
+
+The organizers confirmed that **the test set is not drawn entirely from Third Space
+Learning**. Our two strongest measurable feature families are exactly the ones most exposed
+to that:
+
+- **Disfluency** (filler rate, self-corrections, repetition, `[unclear]` density) is an
+  artifact of *this* ASR pipeline. Another provider's transcripts — or typed tutoring — may
+  have no disfluency markers at all, or mark them differently.
+- **The `background` role** is a diarization-failure bucket specific to this provider's
+  pipeline (confirmed by the organizers as AI diarization plus human QA). Another source may
+  have clean two-speaker attribution, making `struct_background_char_frac` identically zero.
+
+Features that should transfer: turn-taking structure, questioning rates, the order-sensitive
+trajectory features, and topic-relevant window selection — none depend on transcription
+artifacts. This is a testable prediction rather than an assurance, and the honest position is
+that **we do not yet know how much of our measured gain is pipeline-specific**. It is the
+single largest caveat on our results.
 
 ### Limitations
 - Outcomes are binary next-question correctness — a coarse proxy for learning.

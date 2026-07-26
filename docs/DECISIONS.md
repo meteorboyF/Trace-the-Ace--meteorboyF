@@ -218,3 +218,50 @@ of blocks that were wired in, and could not see a block that was simply absent f
 
 **Consequences.** Adding a feature block now requires wiring it into `main.py` or the build
 fails loudly. **Standing rule: format validity does not imply feature validity.**
+
+
+---
+
+## ADR-011 — 2026-07-27 — Forum rulings absorbed; unseen-objective regime measured
+
+**Context.** The organizers answered a batch of clarification questions on the forum. Three
+answers change our constraints materially, and one invalidates an assumption behind our CV.
+
+**Decisions.**
+
+1. **Hosted LLM APIs are now prohibited, not merely dispreferred.** *"Competition data can not
+   be uploaded to an API."* `annotate.moves` must use the local vLLM backend. ADR-004 chose
+   this for cost/risk reasons; it is now a rules requirement.
+2. **Licence allowlist relaxed.** CC-BY-SA is explicitly acceptable, and the open-licensing
+   requirement covers external models *and* data. Our Apache/MIT-only rule was over-strict.
+3. **Added `evaluate.unseen_lo`.** *"Not every learning objective in the test set appears in
+   the training set,"* but only **0.27%** of our CV validation rows exercise that regime — our
+   headline score is measured almost entirely on seen objectives. The new task holds out whole
+   objectives (moving entire sessions to validation so the transcript is never split) and
+   scores only genuinely-unseen rows.
+4. **Flagged multi-source distribution shift as the top generalizability risk.** *"The test set
+   is not drawn entirely from Third Space Learning."* Our disfluency / `[unclear]` /
+   `background`-role features are artifacts of one ASR pipeline and may not exist in another
+   source or modality.
+
+**Measured consequence (5 draws, 25% of objectives held out, ~8,500 rows scored per draw):**
+
+| | log loss |
+|---|---|
+| model on unseen objectives | 0.59178 ± 0.01143 |
+| prior (== `lo_only`, which degenerates to a constant) | 0.59982 ± 0.01224 |
+| **transcript gain** | **−0.00804 ± 0.00260 (distinguishable from zero)** |
+
+The absolute score is much worse than the seen-objective 0.54088 — expected, since the topic
+prior is unavailable — but **the transcript contribution survives** at −0.0080 versus −0.0113
+in the seen regime. That is the reassuring result, and it is exactly what the organizers say
+they want: *"strong submissions will focus on identifying signals in the session transcripts,
+rather than from the learning objective description alone."*
+
+**Alternatives rejected.** Re-weighting CV to match a guessed unseen-objective rate — we do not
+know the test proportion, and guessing it would trade a known-optimistic number for an
+unknown-wrong one. Reporting both regimes separately is more honest.
+
+**Consequences.** Two numbers are now reported, not one: the seen-objective score (0.54088 ±
+0.00055) and the unseen-objective score (0.59178 ± 0.01143). The true leaderboard score sits
+between them, at a mixing ratio only the organizers know.

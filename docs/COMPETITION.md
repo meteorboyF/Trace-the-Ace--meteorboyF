@@ -63,6 +63,29 @@ implements exactly that anti-goal, and every report prints `delta_vs_lo_only`.
 Packages must already exist in their image; additions need a **pull request** to the runtime
 repo (the repo README says PR, not issue — verified 2026-07-26). **Current status: no additions needed** — see [`EXTERNAL_ASSETS.md`](EXTERNAL_ASSETS.md).
 
+## ✅ ORGANIZER RULINGS (forum, June–July 2026) — read before changing anything
+
+Source: `k12-ai-infrastructure.discourse.group/c/tutoring-outcomes/14`, thread *"Several
+clarification questions"*, answers by `kwetstone`. These are authoritative and several
+**change our constraints**.
+
+| # | Ruling | What it means for us |
+|---|---|---|
+| 1 | **"The test set is not drawn entirely from Third Space Learning."** | ⚠️ **Distribution-shift risk.** Our disfluency / `[unclear]` / `background`-role features are artifacts of *this* ASR pipeline. Part of the test set comes from elsewhere, possibly another modality. Robustness work needed; see FINDINGS. |
+| 2 | **"Not every learning objective in the test set appears in the training set."** | ⚠️ `lo_prior_enc` is our highest-gain feature and degrades to the global rate on unseen objectives. Measured by `evaluate.unseen_lo`. |
+| 3 | **`learning_objective_id` means the same skill across all sources.** | ✅ Safe to treat the ID as a stable key; no per-source remapping needed. |
+| 4 | **Transcripts never include dialogue at/after the predicted question** — in train *and* test. | ✅ No target leakage from the transcript tail. Our windowing is sound. |
+| 5 | **Competition data may NOT be uploaded to an API.** | 🚫 Hard constraint on `annotate.moves`: a hosted LLM API is **prohibited**. Local vLLM only — ADR-004 already chose this, now mandatory rather than preferred. |
+| 6 | **Cloud compute is acceptable** if data stays under our control, is not made public, and is not used by the provider for training. | ✅ Colab usage is fine. |
+| 7 | **CC-BY-SA external data is acceptable** — "sufficiently open". Open-licensing applies to *all* external models/data. | ✅ Our allowlist was too strict (Apache/MIT only). CC-BY-SA is permitted. |
+| 8 | **Determinism: "minor variation due to non-deterministic models is acceptable."** | ✅ GPU float non-determinism in an encoder forward pass is not a blocker. |
+| 9 | **Zip ≤ 60 GB**, larger likely to fail. | ✅ Already enforced (we cap at 55 GB). |
+| 10 | **Best submission is used automatically** for final ranking. | ✅ No need to designate a final submission. |
+| 11 | **Measuring on an external public tutoring corpus is "a very useful direction"** for Generalizability (35%). | ⭐ Explicitly blessed. High-value write-up work. |
+| 12 | **Publication bonus: nothing extra to do**; criteria to be published. | ✅ No action. |
+| 13 | **Names are synthetic surrogates**, not real; data rigorously de-identified. | ✅ No PII concern — and no reason to build name features, since they carry no real signal. |
+| 14 | **Diarization was AI + human QA; errors expected.** "Figuring out how to work productively with this imperfect real-world data is a useful aspect of the competition." | ⭐ Validates our `background`-role finding as a legitimate contribution rather than a data complaint. |
+
 ## ⚠️ OPEN RULES QUESTION — cross-row feature inputs (blocking)
 
 **Status: unresolved. Ship SAFE until answered.** See [`FORUM_QUESTION.md`](FORUM_QUESTION.md).

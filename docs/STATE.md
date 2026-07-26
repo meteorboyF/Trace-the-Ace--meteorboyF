@@ -29,6 +29,10 @@ Everything so far has run on **CPU for zero units**.
 | `baseline.lo_only` (the bar) | 0.55220 ± 0.00022 | 0.707 | — |
 | `model.gbdt` (all features, **rules-risky**) | 0.54088 ± 0.00055 | 0.72576 ± 0.00085 | −0.01132 ± 0.00066 |
 | **`model.gbdt` SAFE (shipped)** | **0.54339 ± 0.00058** | — | **−0.00881 ± 0.00070 ✅** |
+| same model, **unseen objectives only** | 0.59178 ± 0.01143 | — | −0.00804 ± 0.00260 |
+
+The test set contains objectives absent from training, so the true LB score sits **between**
+the seen (0.543) and unseen (0.592) figures — at a mix only the organizers know.
 
 **Cost of rules safety: +0.00251 log loss** — we exclude 4 cross-row features pending a forum
 ruling (ADR-009). A DQ would end the competition; 0.0025 log loss would not.
@@ -71,6 +75,16 @@ on a single-seed difference below ~1e-3.
   previously did not).
 - **Artifact namespacing**: subsampled runs write to `<experiment>__subN` for OOF *and*
   model dirs, so a smoke run can never corrupt a full-data result or a submission.
+
+## Forum rulings absorbed 2026-07-27 (see COMPETITION.md for the full table)
+- 🚫 **Competition data may NOT be uploaded to an API** — `annotate.moves` must use local vLLM.
+- ⚠️ **Test set is NOT all Third Space Learning** — our ASR-specific features may not transfer.
+  Largest known generalizability risk.
+- ⚠️ **Not every test objective appears in training** — measured by `evaluate.unseen_lo`:
+  model 0.59178 ± 0.01143 vs prior 0.59982 ± 0.01224; **transcript gain −0.00804 ± 0.00260
+  survives**.
+- ✅ CC-BY-SA external data allowed; minor non-determinism allowed; best submission
+  auto-selected; external-corpus generalizability work explicitly encouraged.
 
 ## Known problems / open risks
 1. **The margin is thin but now solid** (−0.01132 ± 0.00066, CI excludes zero on 5/5 seeds).

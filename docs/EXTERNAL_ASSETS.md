@@ -4,6 +4,16 @@ Competition rule: external datasets and pretrained models are permitted **only i
 available and openly licensed for commercial use**. Winning solutions must be
 MIT-licensable. No NC / CC BY-NC / research-only terms.
 
+**Organizer clarification (forum, 2026-06-26, `kwetstone`):** the open-licensing requirement
+applies to **all** external models *and* data, not just our own code — and **CC-BY-SA is
+acceptable** ("sufficiently open to meet the requirement"). Our earlier allowlist (Apache-2.0
+/ MIT only) was stricter than the rules require. ShareAlike does **not** conflict with the
+MIT winner requirement when the data is never part of the submitted code or model.
+
+**Hard prohibition (same thread):** *"competition data can not be uploaded to an API."*
+Any annotation of transcripts must run locally or on cloud compute we control — never through
+a hosted LLM API. See ADR-004 and ADR-011.
+
 ---
 
 ## 1. Runtime package parity (§7 check 5)
