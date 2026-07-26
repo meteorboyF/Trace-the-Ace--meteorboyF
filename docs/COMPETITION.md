@@ -3,6 +3,17 @@
 Condensed from the authoritative spec in [`BRIEF.md`](BRIEF.md) §2. This file holds only
 what changes an engineering decision. When in doubt, the brief wins.
 
+## Where the competition lives
+**Platform:** `https://platform.k12-ai-infrastructure.org/competitions/3/tutoring-outcomes/`
+(run by DrivenData, but hosted on the K-12 AI Infrastructure Program's own platform — *not*
+drivendata.org). **Runtime repo:** `github.com/drivendataorg/tutoring-outcomes-runtime`.
+
+**Support channel: undocumented.** The runtime repo names no forum, issue tracker or email
+for participant questions; it accepts *dependency* changes by pull request only. Check the
+competition page's Discussion tab first; otherwise email the organizers so a rules answer is
+on the record. Relevant now because a rules question is pending — see
+[`FORUM_QUESTION.md`](FORUM_QUESTION.md).
+
 ## What we are predicting
 Given a student–tutor session transcript plus a learning-objective description, predict
 **P(student answers the next question on that topic correctly)**. One sample = one
@@ -49,8 +60,8 @@ implements exactly that anti-goal, and every report prints `delta_vs_lo_only`.
 | Smoke run | ≤ **10 min** |
 | Logging | **≤ 500 lines × 500 chars** (we enforce 400 lines) |
 
-Packages must already exist in their image; additions need a GitHub issue on the runtime
-repo. **Current status: no additions needed** — see [`EXTERNAL_ASSETS.md`](EXTERNAL_ASSETS.md).
+Packages must already exist in their image; additions need a **pull request** to the runtime
+repo (the repo README says PR, not issue — verified 2026-07-26). **Current status: no additions needed** — see [`EXTERNAL_ASSETS.md`](EXTERNAL_ASSETS.md).
 
 ## ⚠️ OPEN RULES QUESTION — cross-row feature inputs (blocking)
 

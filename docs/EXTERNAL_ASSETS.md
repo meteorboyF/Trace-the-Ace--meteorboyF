@@ -35,7 +35,7 @@ catboost. Test extra: pytest>=9.0.
 | joblib | via scikit-learn | ✅ (asset loading) | OK — bundled with sklearn |
 
 **Result: zero package-addition requests needed.** The submission's entire import surface
-is present in the official image. No GitHub issue required.
+is present in the official image. No pull request required.
 
 ### Dev/Colab-only packages (NEVER imported at inference)
 

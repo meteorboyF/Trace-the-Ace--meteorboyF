@@ -10,7 +10,20 @@ false`, enforced by a `submission.verify` check).
 
 ---
 
-## Post this to the competition forum
+## Where to send it
+
+Check the **Discussion/Forum tab** on
+`https://platform.k12-ai-infrastructure.org/competitions/3/tutoring-outcomes/` first — a public
+answer helps everyone and is citable later. The runtime repo documents no support channel, and
+accepts dependency changes by pull request only, so it is **not** the right venue for this.
+
+If there is no forum, **email the organizers** — for a question with disqualification stakes a
+written reply is worth more than a fast one. Prepend this line when emailing:
+
+> I'm competing solo as meteorboyF. I have a question about the independent-processing rule
+> that I'd like to resolve before submitting further.
+
+## The question (works verbatim as a post or an email body)
 
 > **Subject: Does deriving a feature from session grouping within `test_features.csv` violate independent processing?**
 >
