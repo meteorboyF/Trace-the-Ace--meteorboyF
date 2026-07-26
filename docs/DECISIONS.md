@@ -174,7 +174,16 @@ tasks on paid runtimes. `budget.report` tracks spend against the 733 balance.
 
 ---
 
-## ADR-009 — 2026-07-26 — Ship without cross-row feature inputs pending a rules ruling
+## ADR-009 — 2026-07-26 — Ship without cross-row feature inputs (RULING RECEIVED 2026-07-27)
+
+> **UPDATE 2026-07-27 — the question is settled and our default was correct.** The organizers
+> had already answered this exact question on 2026-07-09: *"To make a prediction on any given
+> test sample, the only input to your model drawn from the test should be that sample's
+> metadata and transcript."* Cross-row features are **prohibited**. The decision below stands
+> unchanged and is now a rules requirement rather than a precaution; the +0.00251 log loss is
+> permanently forfeit. No forum post was needed — searching the existing threads first saved
+> both a duplicate post and several days of waiting.
+
 
 **Context.** Four `lopos_*` features are computed by grouping rows of `test_features.csv`
 that share a `session_id`. `lopos_n_competing_los` is the **second-highest-gain feature in

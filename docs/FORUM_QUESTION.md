@@ -1,111 +1,71 @@
-# Forum question — ready to post
+# Cross-row features — ANSWERED, do not post
 
-**Status:** DRAFT, awaiting posting by the operator.
-**Blocking:** whether `lopos_*` cross-row features may be used at inference.
-**Cost of assuming "no":** +0.00251 CV log loss (measured, 5 fold assignments).
-**Cost of assuming "yes" and being wrong:** disqualification.
-
-Until an answer arrives we ship the SAFE variant (`features.allow_cross_row_aggregates:
-false`, enforced by a `submission.verify` check).
+**Status: RESOLVED 2026-07-09.** No question needs posting; it was already asked and
+answered on the forum. Kept as the audit record.
 
 ---
 
-## Where to send it
+## The ruling
 
-Check the **Discussion/Forum tab** on
-`https://platform.k12-ai-infrastructure.org/competitions/3/tutoring-outcomes/` first — a public
-answer helps everyone and is citable later. The runtime repo documents no support channel, and
-accepts dependency changes by pull request only, so it is **not** the right venue for this.
+Asked by `flzaccaria` (thread: *"Clarification on the independent-processing rule and
+test-set session structure"*):
 
-If there is no forum, **email the organizers** — for a question with disqualification stakes a
-written reply is worth more than a fast one. Prepend this line when emailing:
+> could you clarify the scope of the rule that each test sample must be processed
+> independently? Specifically: the test features file contains multiple rows (samples)
+> belonging to the same session. Is it permitted to compute, for a given test sample,
+> features derived from the structure of the test features file itself — e.g., the number of
+> rows sharing that sample's `session_id`? This uses no labels and no transcript content from
+> other samples, but it does read other rows of the test set.
 
-> I'm competing solo as meteorboyF. I have a question about the independent-processing rule
-> that I'd like to resolve before submitting further.
+Answered by `kwetstone` (organizer):
 
-## The question (works verbatim as a post or an email body)
+> **Yes, that approach would violate the rule that test samples must be processed
+> independently. To make a prediction on any given test sample, the only input to your model
+> drawn from the test should be that sample's metadata and transcript.**
 
-> **Subject: Does deriving a feature from session grouping within `test_features.csv` violate independent processing?**
->
-> Hi — I'd like to check a feature-engineering approach against the independent-processing
-> rule before I build further on it, because I can't tell from the wording whether it's
-> permitted and the downside is disqualification rather than a bad score.
->
-> **The rule as I read it:** "each test data sample should be processed independently …
-> precludes using information gathered across multiple test samples as feature inputs."
->
-> **What I'm doing.** Each sample is a (session, learning objective) pair, and one session
-> can appear in several rows of `test_features.csv` because several objectives were
-> assessed in that lesson. I compute a feature that is simply **the number of rows in
-> `test_features.csv` sharing this row's `session_id`** — i.e. how many objectives were
-> assessed in the same tutoring session — plus a couple of derived positional features
-> (this objective's ordinal position among that session's objectives).
->
-> The motivation is pedagogical rather than statistical: lessons are a fixed ~43 minutes,
-> so objectives compete for a fixed time budget, and how many share the lesson is
-> informative about how much attention each one got.
->
-> **Why I think it might be allowed:**
-> - `session_id` is **provided metadata in the feature file**, not something I infer from
->   the test set or learn across samples.
-> - I'm not fitting anything on test data, not pseudo-labeling, and not using any *label*
->   or *prediction* from another row. The parameters of my model are identical regardless
->   of what the test set contains.
-> - Running my pipeline on a different subset of test rows changes no fitted parameter —
->   only this one count, which is arguably part of the provided input description of a
->   lesson.
->
-> **Why I think it might not be allowed:**
-> - Computing it literally requires reading other rows of `test_features.csv`, which is the
->   plain reading of "information gathered across multiple test samples as feature inputs."
-> - The value depends on test-set composition: if you scored a subset of rows, the same
->   sample would get a different feature value. That seems like exactly the property the
->   rule is designed to exclude.
->
-> **My questions:**
-> 1. Is computing per-session response counts from `test_features.csv` (grouping test rows
->    by the provided `session_id`) a violation of the independent-processing requirement?
-> 2. If it is not allowed in general, does it become allowed if the same quantity is derived
->    from the **transcript file alone** rather than from the feature file?
-> 3. More generally: is the intended boundary "no *fitting* on test data" (so provided
->    metadata may be grouped), or the stricter "each row's features must be computable from
->    that row plus its own transcript in isolation"? A statement of the principle would let
->    me audit the rest of my features myself.
->
-> I've defaulted to **excluding** these features pending an answer, so nothing I submit in
-> the meantime relies on them. Thanks very much.
+That is our exact question, answered unambiguously. **Cross-row features are prohibited.**
 
----
+## What this settles
 
-## Audit performed while drafting this
+- Our default (`features.allow_cross_row_aggregates: false`) was correct. Nothing we have
+  built or shipped violates the rule.
+- The **+0.00251 log loss is permanently forfeit**, not pending. `lopos_n_competing_los` was
+  our second-highest-gain feature; it cannot be used at inference.
+- The organizers also gave us a **clean, checkable principle**, which is more useful than a
+  yes/no: *the only test-derived input is that sample's own metadata and its own transcript.*
 
-Every feature in the pipeline was traced to its inputs. The **only** cross-row argument
-anywhere in the codebase is `all_lo_spans` in `inference_lib.lo_position_features`, which
-feeds exactly four features:
+## Re-audit against the stated principle (2026-07-27)
 
-| Feature | How it is derived | Status |
+Every one of the 181 shipped features traces to a permitted source:
+
+| Source | Count | Permitted? |
 |---|---|---|
-| `lopos_n_competing_los` | count of rows sharing this `session_id` | ⚠️ cross-row |
-| `lopos_ordinal` | rank of this objective among the session's objectives | ⚠️ cross-row |
-| `lopos_ordinal_frac` | same, normalized | ⚠️ cross-row |
-| `lopos_overlap_with_others` | overlap of this objective's window with the others' | ⚠️ cross-row |
+| this sample's own transcript (`struct_ ling_ temp_ fb_ fbs_ traj_`) | 172 | ✅ that sample's transcript |
+| this sample's window within its own transcript (`lopos_` safe subset, `lo_`) | 8 | ✅ that sample's metadata × its own transcript |
+| `lo_prior_enc` — lookup built from **training** labels | 1 | ✅ not drawn from test at all |
 
-**Everything else is independent by construction** — each remaining feature is a function of
-(this row's learning-objective text, this session's own transcript, parameters fitted on
-training data only):
+Fitted parameters are all training-only and therefore not "drawn from the test": the TF-IDF
+vectorizer (training LO text), the Platt calibrator (training OOF), the per-objective prior
+(training labels), the boosters, and the content PCA basis.
 
-- `struct_*`, `ling_*`, `temp_*` — this session's transcript only
-- `lo_*` (alignment) — this row's objective text vs this session's windows; the TF-IDF
-  vocabulary is fit on **training** objective text
-- `fb_*` / `fbs_*`, `traj_*` — this session's transcript, scoped to this row's objective
-- remaining `lopos_*` (`centre_pos`, `start_pos`, `end_pos`, `utt_share`, `minute_share`,
-  `duration_s`, `gap_to_session_end_*`) — this row's window within its own transcript
-- `lo_prior_enc` — a lookup table built from **training** labels only
-- `cont_*` (pending) — this session's window embeddings; PCA basis fit on **training** data
-
-Grouping test rows by `session_id` inside `main.py` for **file-reading efficiency** (so each
-transcript is parsed once) does not itself create a dependency: with the safe flag set, no
-feature *value* is derived from any row other than the one being scored.
+**One implementation note.** `main.py` groups test rows by `session_id` to avoid re-parsing
+the same transcript file. That is I/O sharing, not information sharing: with the flag off, no
+feature *value* is derived from any row other than the one being scored, and the transcript is
+legitimately that sample's own input. `lo_position_features` is passed `[keep]` — this row's
+spans only.
 
 Enforced mechanically by `submission.verify::verify_no_cross_row_features`, which fails the
-build if a cross-row feature reaches the shipped model while the flag is off.
+build if a cross-row feature reaches the shipped model.
+
+## The research finding is unaffected
+
+Objectives competing for a fixed lesson budget remains a valid, reportable result **on
+training data** — where we may group freely. It stays in the paper (FINDINGS F9); it simply
+cannot be a model input at inference. Prohibited-as-a-feature is not the same as
+untrue-as-a-finding.
+
+## Standing rule for future features
+
+Before adding any feature, ask: *could I compute this for a single test row given only that
+row's metadata and its own transcript, plus parameters fitted on training data?* If no, it is
+prohibited. Re-run this audit whenever a block is added.

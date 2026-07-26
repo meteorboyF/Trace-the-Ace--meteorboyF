@@ -11,12 +11,14 @@
 
 ## Status: SUBMISSION READY (safe variant). Awaiting operator to submit.
 
+✅ **Cross-row rules question: SETTLED 2026-07-27.** Already answered on the forum — cross-row
+features are prohibited, our default was correct, nothing to post. +0.00251 permanently
+forfeit. See [`FORUM_QUESTION.md`](FORUM_QUESTION.md).
+
 ⚠️ **Two things need YOU, not me:**
-1. **Post the forum question** in [`FORUM_QUESTION.md`](FORUM_QUESTION.md) — it blocks a
-   +0.00251 log-loss feature set and the downside of guessing wrong is disqualification.
-2. **Submit** — see [`RUNBOOK.md`](RUNBOOK.md) "Submitting for real". I cannot submit on your
-   behalf (your account, and it consumes one of three weekly slots).
-3. **The L4 run** also needs you — this machine has no GPU. Cells are staged in the notebook.
+1. **Submit** — see [`RUNBOOK.md`](RUNBOOK.md) "Submitting for real". I cannot submit on your
+   behalf (your account, and it consumes one of three weekly slots). Nothing now blocks this.
+2. **The L4 run** — this machine has no GPU. Cells are staged in the notebook.
 
 The full cheap ladder is built, runs on the real data, and produces a valid `submission.zip`.
 Everything so far has run on **CPU for zero units**.

@@ -86,35 +86,25 @@ clarification questions"*, answers by `kwetstone`. These are authoritative and s
 | 13 | **Names are synthetic surrogates**, not real; data rigorously de-identified. | ✅ No PII concern — and no reason to build name features, since they carry no real signal. |
 | 14 | **Diarization was AI + human QA; errors expected.** "Figuring out how to work productively with this imperfect real-world data is a useful aspect of the competition." | ⭐ Validates our `background`-role finding as a legitimate contribution rather than a data complaint. |
 
-## ⚠️ OPEN RULES QUESTION — cross-row feature inputs (blocking)
+## ✅ SETTLED — cross-row feature inputs are PROHIBITED
 
-**Status: unresolved. Ship SAFE until answered.** See [`FORUM_QUESTION.md`](FORUM_QUESTION.md).
+Organizer ruling (`kwetstone`, 2026-07-09), answering exactly this question:
 
-The rules preclude "using information gathered across multiple test samples as feature
-inputs". Four features are derived by grouping rows of `test_features.csv` that share a
-`session_id`:
+> **"To make a prediction on any given test sample, the only input to your model drawn from
+> the test should be that sample's metadata and transcript."**
 
-| Feature | Derivation |
-|---|---|
-| `lopos_n_competing_los` | count of rows sharing this `session_id` |
-| `lopos_ordinal` / `lopos_ordinal_frac` | rank among the session's objectives |
-| `lopos_overlap_with_others` | window overlap with the session's other objectives |
+Computing a feature by grouping rows of `test_features.csv` (e.g. counting how many
+objectives share a `session_id`) **violates** the independent-processing rule.
 
-Ambiguity is genuine: `session_id` is *provided metadata*, no fitting occurs on test data,
-and model parameters are unaffected by test-set composition — but the *value* of these
-features does depend on which other rows exist, which is the plain reading of the
-prohibition.
+**Our position:** `features.allow_cross_row_aggregates: false` — now a rules requirement, not
+a precaution. `submission.verify::verify_no_cross_row_features` fails the build if one reaches
+the shipped model. Cost: **+0.00251 CV log loss, permanently forfeit** (it removed our
+second-highest-gain feature). The associated *research finding* remains valid on training data
+and stays in the paper.
 
-**Our position:** default `features.allow_cross_row_aggregates: false` in `conf/base.yaml`.
-`submission.verify::verify_no_cross_row_features` fails the build if one reaches the shipped
-model. **Measured cost of safety: +0.00251 CV log loss** (22% of the transcript's total
-contribution) — a real price, and still far cheaper than a disqualification.
-
-The associated *research* finding (objectives compete for a fixed lesson budget) is valid on
-**training** data regardless of the ruling, and stays in the paper either way.
-
-**Every other feature is independent by construction** — full audit in
-[`FORUM_QUESTION.md`](FORUM_QUESTION.md). Re-run that audit whenever a block is added.
+**The checkable principle for every future feature:** could this be computed for one test row
+from that row's metadata + its own transcript + training-fitted parameters alone? If not, it
+is prohibited. Full audit in [`FORUM_QUESTION.md`](FORUM_QUESTION.md).
 
 ## Disqualification risks — treat as hard constraints
 1. **Never print or log anything about the test data** — no excerpts, no learning-objective

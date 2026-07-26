@@ -62,17 +62,18 @@ selftest:
   n_sessions: 50
   max_seconds: 300
 
-# --- Competition-rules safety -------------------------------------------------
-# The rules require each test sample to be processed INDEPENDENTLY, and explicitly
-# preclude "using information gathered across multiple test samples as feature inputs".
+# --- Competition-rules boundary (NOT a tuning knob) ---------------------------
+# SETTLED by organizer ruling 2026-07-09 (kwetstone):
+#   "To make a prediction on any given test sample, the only input to your model drawn
+#    from the test should be that sample's metadata and transcript."
 #
-# A few lo_position features are computed by GROUPING test rows that share a session_id
-# (e.g. counting how many objectives were assessed in the same lesson). Whether that is
-# permitted is genuinely ambiguous — session grouping is provided metadata, not inferred —
-# so a forum question is pending (docs/COMPETITION.md).
+# Computing a feature by grouping rows of test_features.csv (e.g. counting objectives
+# sharing a session_id) VIOLATES the independent-processing rule.
 #
-# DEFAULT IS SAFE: cross-row aggregates are EXCLUDED. Flip to true only after the
-# organizers confirm it is allowed. A slightly worse score beats a disqualification.
+# ⛔ DO NOT SET THIS TRUE FOR A SUBMISSION. It exists only so the same features can be
+# computed on TRAINING data for research purposes — the "objectives compete for a fixed
+# lesson budget" finding is valid there and appears in the paper. Any build with this
+# enabled is disqualification-risky, and submission.verify will flag it.
 features:
   allow_cross_row_aggregates: false
 
