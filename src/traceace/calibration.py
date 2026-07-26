@@ -12,6 +12,7 @@ log loss, including "none") is persisted and applied at inference.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -83,6 +84,26 @@ def export_calibrator(method: str, model: Any) -> dict[str, Any]:
     return {"method": "none"}
 
 
+def _persist_calibrator(method: str, model: Any, model_dir: Path) -> None:
+    """Persist exactly the selected calibrator, removing artifacts from older runs."""
+    import joblib
+
+    model_dir.mkdir(parents=True, exist_ok=True)
+    plain_path = model_dir / "calibrator_plain.joblib"
+    fitted_path = model_dir / "calibrator.joblib"
+    if method == "none":
+        # A previous run may have selected Platt/isotonic. Leaving either file behind
+        # makes submission.build silently ship that stale calibrator even though this run
+        # selected "none".
+        plain_path.unlink(missing_ok=True)
+        fitted_path.unlink(missing_ok=True)
+        return
+
+    plain = export_calibrator(method, model)
+    joblib.dump(plain, plain_path)
+    joblib.dump({"method": method, "model": model}, fitted_path)
+
+
 def _logit(p: np.ndarray) -> np.ndarray:
     p = clip_probs(p)
     return np.log(p / (1.0 - p))
@@ -98,12 +119,11 @@ def fit(
     experiment: str = "model.gbdt",
     force: bool = False,
     subsample: int | None = None,
+    cv_seed: int | None = None,
 ) -> dict[str, Any]:
     """Compare no-calibration / Platt / isotonic on OOF, using an inner fold loop."""
-    import joblib
-
-    oof = load_oof(experiment, subsample=subsample)
-    folds = load_folds(subsample=subsample)[["response_id", "fold"]]
+    oof = load_oof(experiment, subsample=subsample, cv_seed=cv_seed)
+    folds = load_folds(subsample=subsample, cv_seed=cv_seed)[["response_id", "fold"]]
     df = oof.merge(folds, on="response_id", how="left")
     if df["fold"].isna().any():
         raise RuntimeError("OOF rows missing fold assignment — rebuild cv or the OOF frame")
@@ -148,24 +168,21 @@ def fit(
         best,
     )
 
-    # refit the winner on ALL oof data and persist for inference
+    # Refit the winner on ALL OOF data and persist exactly that selection. This also
+    # removes a stale calibrator when "none" wins after an earlier calibrated run.
+    mdir = experiment_dir(experiment, subsample, cv_seed)
     if best != "none":
         best_fitter, _ = methods[best]
         assert best_fitter is not None  # "none" is the only entry with a null fitter
-        mdir = experiment_dir(experiment, subsample)
-        mdir.mkdir(parents=True, exist_ok=True)
         final = best_fitter(p, y)
-        # ALSO export the calibrator as plain numbers. The submission ships these, not the
-        # fitted object: the runtime's scikit-learn differs from ours, and unpickling across
-        # versions warns of "invalid results". Arithmetic is version-proof.
-        plain = export_calibrator(best, final)
-        joblib.dump(plain, mdir / "calibrator_plain.joblib")
-        joblib.dump({"method": best, "model": final}, mdir / "calibrator.joblib")
+        _persist_calibrator(best, final, mdir)
+    else:
+        _persist_calibrator("none", None, mdir)
 
     cal_exp = f"{experiment}.calibrated"
     out = df[["response_id", "session_id", LABEL_COL]].copy()
     out["pred"] = calibrated[best]
-    save_oof(cal_exp, out, subsample=subsample)
+    save_oof(cal_exp, out, subsample=subsample, cv_seed=cv_seed)
 
     res: dict[str, Any] = {
         "experiment": experiment,
@@ -177,7 +194,9 @@ def fit(
     res.update(
         {
             f"final_{k}": v
-            for k, v in score_frame(out, cal_exp).items()
+            for k, v in score_frame(
+                out, cal_exp, subsample=subsample, cv_seed=cv_seed
+            ).items()
             if k in ("logloss", "auc", "delta_vs_lo_only")
         }
     )

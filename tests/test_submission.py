@@ -200,6 +200,14 @@ def test_main_py_asserts_feature_order_at_runtime():
     assert "feature order does not match the trained booster" in MAIN_TEMPLATE
 
 
+def test_main_py_explicitly_falls_back_for_unreadable_transcripts():
+    """Finite LightGBM predictions must not mask a missing/empty transcript."""
+    from traceace.packaging.main_template import MAIN_TEMPLATE
+
+    assert 'feats["_use_fallback"] = not transcript_ok' in MAIN_TEMPLATE
+    assert "bad = ~np.isfinite(preds) | use_fallback" in MAIN_TEMPLATE
+
+
 def test_scrambled_feature_order_is_detected(synth_repo):
     """A permuted feature order must be caught by verify, not shipped."""
     import lightgbm as lgb

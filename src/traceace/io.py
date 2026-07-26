@@ -44,6 +44,21 @@ def load_train_features(config: Config | None = None) -> pd.DataFrame:
     return df
 
 
+def subsample_session_ids(n_sessions: int, config: Config | None = None) -> list[str]:
+    """The canonical deterministic session cohort for every subsampled task."""
+    if n_sessions < 1:
+        raise ValueError("n_sessions must be positive")
+    feats = load_train_features(config)
+    return (
+        feats["session_id"]
+        .dropna()
+        .astype(str)
+        .drop_duplicates()
+        .head(n_sessions)
+        .tolist()
+    )
+
+
 def load_train_labels(config: Config | None = None) -> pd.DataFrame:
     """Load labels, canonicalizing the label column to ``correct`` (float)."""
     df = pd.read_csv(raw_file("train_labels", config))

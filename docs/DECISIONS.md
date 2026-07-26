@@ -373,3 +373,50 @@ including one that builds a real booster and asserts a permuted order is rejecte
 exists, the columns are present, the rows align, the probabilities are in range. None of them
 asked whether the thing *works*. Every verification suite needs at least one check that
 exercises the artifact end-to-end against known answers.
+
+
+---
+
+## ADR-014 — 2026-07-27 — Independent review found 8 defects, incl. target-encoding leakage
+
+**Context.** After the feature-order bug reached the leaderboard, an independent reviewer was
+given `docs/REVIEW_PROMPT.md` and repo access. It found **eight** distinct defects. Two were
+verified here from scratch before accepting any patch.
+
+**Verified independently:**
+
+1. **Target-encoding leakage (serious, affected every reported CV number).**
+   `_fold_safe_lo_encoding` wrote a *single* `enc` array across all outer folds. Processing
+   outer fold *k* overwrote the training-row encodings of every *other* fold — so fold 0's
+   carefully leak-free validation encoding was clobbered during folds 1–4, replaced by one
+   derived from data including fold 0's own labels. Only the last fold survived intact.
+   Reproduced with a mutation test: flipping *only* fold 0's validation labels moved fold 0's
+   own encoding by **−0.25**. A leak-free encoding cannot move at all.
+   *Fix:* the encoding is computed per outer fold, so each booster gets its own fold-safe map.
+
+2. **Subsample cohort mismatch (made `selftest.all` largely vacuous).**
+   `cv.build` and the response-level blocks selected "the first N sessions" in
+   *train_features row order*; session-level blocks selected them in *transcript filename
+   order*. At N=400 the two cohorts **overlapped in 9 sessions — 2.2%**. Roughly 98% of
+   self-test rows therefore had all-NaN session-level features, and the self-test passed while
+   exercising almost nothing.
+   *Fix:* cohort selection is centralized, and `build_matrix` now rejects a block that is
+   absent for any row rather than letting LightGBM absorb the NaNs.
+
+**Also fixed by the review** (each with a regression test): the verifier's prediction check
+inspected a hardcoded archive rather than the one named by the caller; a stale calibrator
+survived when "no calibration" won; the cross-row rules guard could return PASS when the flag
+was enabled; unreadable transcripts produced finite tree predictions instead of the documented
+prior fallback; OOF frames of equal length but different cohorts could be compared; and
+`ensemble.blend` accepted an implicit experiment list.
+
+**Consequences — reported numbers move.** With leakage removed, repeated-seed CV over 5 fold
+assignments gives **0.54286 ± 0.00044** (was 0.54088 ± 0.00055) and a transcript contribution
+of **−0.00934 ± 0.00040** (was −0.01132 ± 0.00066). The contribution remains real — 5/5 seeds,
+CI excluding zero — but it is **smaller than previously reported**, and every earlier CV figure
+in this repo was measured under leakage. Findings and the paper draft are updated accordingly.
+
+**The lesson.** Three of our four self-inflicted bugs were caught by *our own* checks only
+after they had already caused damage; these two were never caught at all. An outside reviewer
+with an explicit brief about the failure *class* found in one pass what months of internal
+checking had missed. Budget for external review before a deadline, not after a failure.

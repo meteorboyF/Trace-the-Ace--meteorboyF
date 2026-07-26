@@ -72,6 +72,14 @@ def test_timestamp_parsing_parity():
         assert (np.isnan(a) and np.isnan(b)) or a == b
 
 
+def test_missing_role_normalization_parity(synth_transcript):
+    frame = synth_transcript.copy()
+    frame.loc[0, "role"] = None
+    train_df, infer_df = _both(frame)
+    assert train_df["role"].tolist() == infer_df["role"].tolist()
+    assert train_df.loc[0, "role"] == "unknown"
+
+
 def test_inference_lib_has_no_traceace_imports():
     """The shipped library must be standalone — it runs from the zip with no package."""
     from pathlib import Path

@@ -132,6 +132,43 @@ def baseline_logloss(subsample: int | None = None, cv_seed: int | None = None) -
     return logloss(b[LABEL_COL].to_numpy(), b["pred"].to_numpy())
 
 
+def align_compatible_oof(
+    reference: pd.DataFrame,
+    candidate: pd.DataFrame,
+    reference_name: str,
+    candidate_name: str,
+) -> pd.DataFrame:
+    """Validate exact OOF cohort/truth compatibility and align candidate row order."""
+    required = {"response_id", "session_id", LABEL_COL, "pred"}
+    for name, frame in ((reference_name, reference), (candidate_name, candidate)):
+        missing = required - set(frame.columns)
+        if missing:
+            raise KeyError(f"OOF {name!r} is missing columns {sorted(missing)}")
+        if frame["response_id"].isna().any() or frame["response_id"].duplicated().any():
+            raise RuntimeError(f"OOF {name!r} has null or duplicate response_id values")
+
+    ref_ids = reference["response_id"].astype(str)
+    cand = candidate.assign(response_id=candidate["response_id"].astype(str)).set_index(
+        "response_id"
+    )
+    if set(ref_ids) != set(cand.index):
+        raise RuntimeError(
+            f"OOF cohorts differ for {reference_name!r} and {candidate_name!r}; "
+            "refusing an unpaired score"
+        )
+    aligned = cand.loc[ref_ids].reset_index()
+    ref_y = reference[LABEL_COL].to_numpy(dtype=float)
+    cand_y = aligned[LABEL_COL].to_numpy(dtype=float)
+    ref_sessions = reference["session_id"].astype(str).to_numpy()
+    cand_sessions = aligned["session_id"].astype(str).to_numpy()
+    if not np.array_equal(ref_y, cand_y) or not np.array_equal(ref_sessions, cand_sessions):
+        raise RuntimeError(
+            f"OOF truth/session provenance differs for {reference_name!r} and "
+            f"{candidate_name!r}"
+        )
+    return aligned
+
+
 def score_frame(
     df: pd.DataFrame,
     experiment: str = "",
@@ -151,25 +188,25 @@ def score_frame(
         "subsample": subsample,
         "cv_seed": cv_seed,
     }
-    base = baseline_logloss(subsample=subsample, cv_seed=cv_seed)
-    if base is not None:
+    try:
+        baseline = load_oof(BASELINE_KEY, subsample=subsample, cv_seed=cv_seed)
+    except FileNotFoundError:
+        baseline = None
+    if baseline is not None:
+        baseline = align_compatible_oof(
+            df.reset_index(drop=True),
+            baseline,
+            experiment or "(unnamed)",
+            BASELINE_KEY,
+        )
+        base = logloss(
+            baseline[LABEL_COL].to_numpy(dtype=float),
+            baseline["pred"].to_numpy(dtype=float),
+        )
         # negative delta = better than the LO-only bar (lower log loss is better)
         out["baseline_lo_only_logloss"] = base
         out["delta_vs_lo_only"] = ll - base
         out["beats_lo_only"] = bool(ll < base)
-        # Guard against the row-count mismatch that made this bug invisible.
-        try:
-            nb = len(load_oof(BASELINE_KEY, subsample=subsample, cv_seed=cv_seed))
-            if nb != len(df):
-                out["WARNING_baseline_row_mismatch"] = f"model n={len(df)} vs baseline n={nb}"
-                log.error(
-                    "delta_vs_lo_only compares %d model rows against %d baseline rows — "
-                    "these are NOT comparable. Re-run baseline.lo_only at this subsample.",
-                    len(df),
-                    nb,
-                )
-        except FileNotFoundError:
-            pass
     return out
 
 
@@ -247,10 +284,11 @@ def report(
     experiment: str = "model.gbdt",
     force: bool = False,
     subsample: int | None = None,
+    cv_seed: int | None = None,
 ) -> dict[str, Any]:
     """Score a persisted OOF experiment and write a JSON report."""
-    df = load_oof(experiment, subsample=subsample)
-    res = score_frame(df, experiment, subsample=subsample)
+    df = load_oof(experiment, subsample=subsample, cv_seed=cv_seed)
+    res = score_frame(df, experiment, subsample=subsample, cv_seed=cv_seed)
     res["ece"] = expected_calibration_error(df[LABEL_COL].to_numpy(), df["pred"].to_numpy())
 
     # slices, where the necessary columns are available on the OOF frame

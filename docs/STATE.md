@@ -58,8 +58,10 @@ Everything so far has run on **CPU for zero units**.
 |---|---|---|---|
 | `baseline.prior` | 0.60876 | 0.500 | +0.0569 |
 | `baseline.lo_only` (the bar) | 0.55220 ± 0.00022 | 0.707 | — |
-| `model.gbdt` (all features, **rules-risky**) | 0.54088 ± 0.00055 | 0.72576 ± 0.00085 | −0.01132 ± 0.00066 |
-| **`model.gbdt` SAFE (shipped, sklearn 1.8.0)** | **0.54360** | — | **−0.00824 ✅** |
+| **`model.gbdt` SAFE (shipped, leak-free)** | **0.54286 ± 0.00044** | **0.72263 ± 0.00070** | **−0.00934 ± 0.00040 ✅** |
+
+⚠️ **All CV numbers reported before 2026-07-27 were measured under target-encoding leakage**
+(ADR-014) and are superseded. The corrected contribution is smaller: −0.00934 vs −0.01132.
 | same model, **unseen objectives only** | 0.59178 ± 0.01143 | — | −0.00804 ± 0.00260 |
 
 The test set contains objectives absent from training, so the true LB score sits **between**

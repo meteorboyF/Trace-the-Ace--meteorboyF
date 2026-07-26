@@ -64,9 +64,12 @@ def prior(
         df.loc[va, "pred"] = float(df.loc[tr, LABEL_COL].mean())
 
     save_oof(
-        "baseline.prior", df[["response_id", "session_id", LABEL_COL, "pred"]], subsample=subsample
+        "baseline.prior",
+        df[["response_id", "session_id", LABEL_COL, "pred"]],
+        subsample=subsample,
+        cv_seed=cv_seed,
     )
-    res = score_frame(df, "baseline.prior", subsample=subsample)
+    res = score_frame(df, "baseline.prior", subsample=subsample, cv_seed=cv_seed)
     log.info("baseline.prior: logloss=%.5f (floor)", res["logloss"])
     return res
 

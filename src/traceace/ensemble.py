@@ -18,10 +18,18 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from .evaluate import clip_probs, load_oof, logloss, save_oof, score_frame
+from .evaluate import (
+    align_compatible_oof,
+    clip_probs,
+    experiment_dir,
+    load_oof,
+    logloss,
+    save_oof,
+    score_frame,
+)
 from .io import LABEL_COL
 from .logging_utils import get_logger
-from .paths import models_dir, runs_dir
+from .paths import runs_dir
 from .tasks import task
 
 log = get_logger("ensemble")
@@ -76,23 +84,24 @@ def blend(
 ) -> dict[str, Any]:
     import joblib
 
-    from .evaluate import list_oof
-
     if experiments is None:
-        # everything except the baselines and previous blends
-        experiments = [
-            e for e in list_oof() if not e.startswith("baseline.") and not e.startswith("ensemble.")
-        ]
+        raise ValueError(
+            "experiments must be explicit; auto-discovery mixes full, subsampled, "
+            "repeated-seed, calibrated, and ablation OOF artifacts"
+        )
     if len(experiments) == 0:
         raise RuntimeError("no OOF experiments to blend — train a model first")
 
-    frames = {e: load_oof(e).set_index("response_id") for e in experiments}
-    common = sorted(set.intersection(*(set(f.index) for f in frames.values())))
-    if not common:
-        raise RuntimeError("no common response_ids across the requested experiments")
-
-    preds = np.column_stack([frames[e].loc[common, "pred"].to_numpy() for e in experiments])
-    first = frames[experiments[0]].loc[common]
+    raw = {e: load_oof(e, subsample=subsample) for e in experiments}
+    first = raw[experiments[0]].reset_index(drop=True)
+    frames = {
+        experiments[0]: first,
+        **{
+            e: align_compatible_oof(first, raw[e], experiments[0], e)
+            for e in experiments[1:]
+        },
+    }
+    preds = np.column_stack([frames[e]["pred"].to_numpy() for e in experiments])
     y = first[LABEL_COL].to_numpy(dtype=float)
 
     w = optimal_weights(preds, y)
@@ -100,25 +109,25 @@ def blend(
 
     out = pd.DataFrame(
         {
-            "response_id": common,
+            "response_id": first["response_id"].to_numpy(),
             "session_id": first["session_id"].to_numpy(),
             LABEL_COL: y,
             "pred": blended,
         }
     )
-    save_oof(output_experiment, out)
+    save_oof(output_experiment, out, subsample=subsample)
 
-    mdir = models_dir() / output_experiment.replace(".", "_")
+    mdir = experiment_dir(output_experiment, subsample)
     mdir.mkdir(parents=True, exist_ok=True)
     joblib.dump({"experiments": experiments, "weights": w.tolist()}, mdir / "weights.joblib")
 
-    res = score_frame(out, output_experiment)
+    res = score_frame(out, output_experiment, subsample=subsample)
     res.update(
         {
             "experiments": experiments,
             "weights": {e: float(wi) for e, wi in zip(experiments, w)},
             "individual_logloss": {e: logloss(y, preds[:, i]) for i, e in enumerate(experiments)},
-            "n_common": len(common),
+            "n_common": len(first),
         }
     )
     d = runs_dir() / "ensemble"

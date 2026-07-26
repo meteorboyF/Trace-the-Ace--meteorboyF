@@ -76,6 +76,7 @@ def stress_test(
     blocks: list[str] | None = None,
     num_boost_round: int = 800,
     seed: int | None = None,
+    lo_smoothing: float = 20.0,
 ) -> dict[str, Any]:
     """Measure performance on genuinely unseen learning objectives.
 
@@ -87,7 +88,12 @@ def stress_test(
 
     from .config import get_config
     from .features.assemble import DEFAULT_BLOCKS, build_matrix
-    from .models.gbdt import DEFAULT_PARAMS
+    from .models.gbdt import (
+        DEFAULT_PARAMS,
+        LO_ENC_COL,
+        _inner_oof_lo_encoding,
+        _smoothed_map,
+    )
 
     cfg = get_config()
     seed = int(seed if seed is not None else cfg.seed)
@@ -124,15 +130,24 @@ def stress_test(
 
         p = dict(DEFAULT_PARAMS)
         p.update({"seed": seed + r, "bagging_seed": seed + r, "feature_fraction_seed": seed + r})
+        model_cols = [*feat_cols, LO_ENC_COL]
+        x_train = tr[feat_cols].copy()
+        x_valid = va_unseen[feat_cols].copy()
+        x_train[LO_ENC_COL] = _inner_oof_lo_encoding(
+            tr, smoothing=lo_smoothing, seed=seed + r
+        )
+        lo_map, global_rate = _smoothed_map(tr, smoothing=lo_smoothing)
+        x_valid[LO_ENC_COL] = (
+            va_unseen[LO_COL].map(lo_map).fillna(global_rate).to_numpy()
+        )
         booster = lgb.train(
             p,
-            lgb.Dataset(tr[feat_cols], label=tr[LABEL_COL].to_numpy()),
+            lgb.Dataset(x_train[model_cols], label=tr[LABEL_COL].to_numpy()),
             num_boost_round=num_boost_round,
         )
         y = va_unseen[LABEL_COL].to_numpy()
-        pred = np.asarray(booster.predict(va_unseen[feat_cols]), dtype=float)
+        pred = np.asarray(booster.predict(x_valid[model_cols]), dtype=float)
 
-        global_rate = float(tr[LABEL_COL].mean())
         model_ll.append(logloss(y, pred))
         prior_ll.append(logloss(y, np.full(len(y), global_rate)))
         # NOTE: lo_only on an unseen objective has nothing to look up, so it degenerates
@@ -154,6 +169,9 @@ def stress_test(
         "holdout_frac": holdout_frac,
         "n_repeats": len(model_ll),
         "blocks": blocks,
+        "include_lo_prior": True,
+        "lo_smoothing": lo_smoothing,
+        "num_boost_round": num_boost_round,
         "model_unseen": res_model.to_dict(),
         "prior_unseen": res_prior.to_dict(),
         "rows_scored": res_n.to_dict(),

@@ -105,6 +105,36 @@ def test_cache_version_invalidates(synth_repo):
     assert feature_cache_path("blk", "v1") != feature_cache_path("blk", "v2")
 
 
+def test_subsampled_transcripts_follow_train_feature_session_order(synth_repo):
+    """Every block must interpret subsample=N as the same N-session cohort."""
+    from traceace.features.common import iter_session_frames
+    from traceace.paths import raw_file, transcripts_dir
+
+    raw_file("train_features").parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "response_id": ["r_z", "r_a"],
+            # Deliberately opposite filename sort order.
+            "session_id": ["z_first_in_training", "a_second_in_training"],
+            "learning_objective_id": ["lo0", "lo1"],
+            "learning_objective": ["objective zero", "objective one"],
+        }
+    ).to_csv(raw_file("train_features"), index=False)
+
+    tdir = transcripts_dir()
+    tdir.mkdir(parents=True)
+    transcript = "session_id,utterance_id,role,content,timestamp\n"
+    (tdir / "a_second_in_training.csv").write_text(
+        transcript + "a_second_in_training,0,tutor,synthetic,0:00:01\n"
+    )
+    (tdir / "z_first_in_training.csv").write_text(
+        transcript + "z_first_in_training,0,tutor,synthetic,0:00:01\n"
+    )
+
+    selected = [sid for sid, _ in iter_session_frames(subsample=1)]
+    assert selected == ["z_first_in_training"]
+
+
 # --- staging idempotency -----------------------------------------------------
 def test_stage_local_is_noop_when_already_staged(tmp_path, monkeypatch):
     work = tmp_path / "work"

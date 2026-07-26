@@ -39,6 +39,14 @@ def iter_session_frames(
     :mod:`traceace.paths` ensures this never iterates a FUSE mount.
     """
     files = list(iter_files(transcripts_dir(), "*.csv"))
+    if session_ids is None and subsample is not None:
+        # All subsampled tasks must use the same cohort as cv.build and the
+        # response-level blocks. Taking the first N sorted transcript filenames selects
+        # an almost-disjoint cohort when train_features.csv is in a different order.
+        from ..io import subsample_session_ids
+
+        session_ids = set(subsample_session_ids(subsample))
+        subsample = None
     if session_ids is not None:
         files = [f for f in files if f.stem in session_ids]
     if subsample is not None:
@@ -57,7 +65,7 @@ def normalize_frame(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("session_id", "utterance_id", "role", "content", "timestamp"):
         if col not in df.columns:
             df[col] = pd.NA
-    df["role"] = df["role"].astype("string").str.strip().str.lower()
+    df["role"] = df["role"].astype("string").fillna("unknown").str.strip().str.lower()
     df["content"] = df["content"].astype("string").fillna("")
     df["utterance_idx"] = pd.to_numeric(df["utterance_id"], errors="coerce")
     from ..data import parse_elapsed_seconds

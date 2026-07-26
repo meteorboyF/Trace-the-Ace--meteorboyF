@@ -38,15 +38,37 @@ log = get_logger("submission.build")
 def _collect_boosters(experiment: str) -> list[Any]:
     import lightgbm as lgb
 
+    cfg = get_config()
     # Deliberately the FULL-data directory (subsample=None). A submission must never be
     # built from a subsampled smoke model — see evaluate.experiment_dir.
     mdir = experiment_dir(experiment, None)
-    files = sorted(mdir.glob("fold*.txt"))
-    if not files:
+    expected = [mdir / f"fold{k}.txt" for k in range(int(cfg.cv["n_splits"]))]
+    actual = sorted(mdir.glob("fold*.txt"))
+    if actual != expected:
         raise FileNotFoundError(
-            f"no fold models under {mdir} — run tasks.run('{experiment}') first"
+            f"expected exactly {[p.name for p in expected]} under {mdir}, got "
+            f"{[p.name for p in actual]}; retrain {experiment!r} as one complete generation"
         )
-    return [lgb.Booster(model_file=str(f)) for f in files]
+    return [lgb.Booster(model_file=str(f)) for f in expected]
+
+
+def _collect_fold_lo_priors(experiment: str, boosters: list[Any]) -> list[dict[str, Any]]:
+    """Load the target-encoding map fitted for each booster's outer training fold."""
+    mdir = experiment_dir(experiment, None)
+    if not boosters or "lo_prior_enc" not in set(boosters[0].feature_name()):
+        return []
+    paths = [mdir / f"lo_prior_fold{k}.json" for k in range(len(boosters))]
+    missing = [p.name for p in paths if not p.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"fold-specific LO-prior artifacts missing {missing}; retrain {experiment!r} "
+            "before building a submission"
+        )
+    specs = [json.loads(path.read_text()) for path in paths]
+    for k, spec in enumerate(specs):
+        if int(spec.get("fold", -1)) != k:
+            raise RuntimeError(f"{paths[k].name} declares the wrong fold")
+    return specs
 
 
 def _feature_cols(experiment: str, boosters: list[Any]) -> list[str]:
@@ -119,6 +141,7 @@ def build(
     # --- model bundle -------------------------------------------------------
     boosters = _collect_boosters(experiment)
     feature_cols = _feature_cols(experiment, boosters)
+    fold_lo_priors = _collect_fold_lo_priors(experiment, boosters)
     # Ship the PLAIN-NUMBER calibrator, never the fitted sklearn estimator: the runtime's
     # scikit-learn version differs from ours and unpickling across versions warns of
     # "invalid results" (observed in a container smoke test, 2026-07-27).
@@ -134,6 +157,7 @@ def build(
         "calibrator": calibrator,
         "lo_vectorizer": fit_lo_vectorizer(),
         "lo_prior": _lo_prior(),
+        "lo_prior_by_booster": fold_lo_priors,
         "fallback_prob": float(train_df[LABEL_COL].mean()),
         "seed": cfg.seed,
         "experiment": experiment,
@@ -145,6 +169,7 @@ def build(
         "experiment": experiment,
         "n_boosters": len(boosters),
         "n_features": len(feature_cols),
+        "target_encoding": "fold_specific" if fold_lo_priors else "absent",
         "calibrator": (calibrator or {}).get("method", "none"),
         "sklearn_build_version": __import__("sklearn").__version__,
         "seed": cfg.seed,

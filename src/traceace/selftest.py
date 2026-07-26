@@ -93,7 +93,7 @@ def all_(
         params={"min_data_in_leaf": 5, "num_leaves": 15},
     )
     step("calibrate.fit", experiment="model.gbdt", subsample=n_sessions)
-    step("evaluate.report", experiment="model.gbdt")
+    step("evaluate.report", experiment="model.gbdt", subsample=n_sessions)
     step("interpret.report", experiment="model.gbdt", subsample=n_sessions)
 
     step("annotate.moves", subsample=n_sessions, n_sample=2000, force=force)

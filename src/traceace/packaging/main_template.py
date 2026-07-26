@@ -76,54 +76,70 @@ def main() -> int:
     vectorizer = bundle.get("lo_vectorizer")
     fallback = float(bundle.get("fallback_prob", 0.5))
     lo_prior = dict(bundle.get("lo_prior", {}))
+    lo_prior_by_booster = list(bundle.get("lo_prior_by_booster", []))
     log("assets loaded")
 
     sub_fmt = pd.read_csv(DATA / "submission_format.csv", dtype={"response_id": str})
     features = pd.read_csv(DATA / "test_features.csv", dtype=str)
+    required = {
+        "response_id",
+        "session_id",
+        "learning_objective_id",
+        "learning_objective",
+    }
+    if not required.issubset(features.columns):
+        raise RuntimeError("test feature schema is invalid")
+    if features[list(required)].isna().any().any():
+        raise RuntimeError("test features contain missing required metadata")
+    if (
+        features["response_id"].duplicated().any()
+        or sub_fmt["response_id"].duplicated().any()
+        or set(features["response_id"]) != set(sub_fmt["response_id"])
+    ):
+        raise RuntimeError("input response ids are invalid or inconsistent")
     log("inputs read")
 
     # ---- per-sample feature extraction --------------------------------------
     # INDEPENDENCE: every feature below is a function of (this row's learning objective,
     # this session's own transcript, training-fitted parameters). Rows are grouped by
     # session only to avoid re-reading the same transcript file — never to derive a value
-    # from another row. Cross-row aggregates are excluded from the model entirely unless
-    # the organizers confirm they are permitted (see conf/base.yaml).
+    # from another row. Organizer-prohibited cross-row aggregates are not shipped.
     rows = []
     tdir = DATA / "test_transcripts"
-    for sid, grp in features.groupby("session_id"):
+    for sid, grp in features.groupby("session_id", sort=False):
         tdf = None
         try:
             tdf = ilib.normalize_frame(pd.read_csv(tdir / f"{sid}.csv", dtype=str))
         except Exception:
             tdf = None
+        transcript_ok = tdf is not None and not tdf.empty
 
-        spans = ilib.windows(tdf) if tdf is not None else []
+        spans = []
         wm = None
-        if tdf is not None and spans and vectorizer is not None:
+        session_feats = {}
+        session_fb = {}
+        if transcript_ok:
             try:
+                if vectorizer is None:
+                    raise RuntimeError
+                spans = ilib.windows(tdf)
                 wm = vectorizer.transform(ilib.window_texts(tdf, spans))
+                session_feats = ilib.all_session_features(tdf)
+                session_fb = ilib.feedback_features(tdf, prefix="fbs_")
             except Exception:
-                wm = None
-
-        # session-scope blocks: identical for every row of this session, computed once
-        session_feats = ilib.all_session_features(tdf) if tdf is not None else {}
-        session_fb = (
-            ilib.feedback_features(tdf, prefix="fbs_") if tdf is not None else {}
-        )
+                # Do not expose the session id/path through a chained traceback.
+                raise RuntimeError("session feature extraction failed") from None
 
         for _, r in grp.iterrows():
             feats = dict(session_feats)
             feats.update(session_fb)
             lo_text = str(r.get("learning_objective") or "")
 
-            if tdf is not None and wm is not None:
+            if transcript_ok:
                 try:
                     feats.update(
                         ilib.lo_alignment_features(tdf, lo_text, vectorizer, wm, spans)
                     )
-                except Exception:
-                    pass
-                try:
                     # the top-k LO-relevant windows, merged and in chronological order
                     keep = ilib.topk_spans(lo_text, vectorizer, wm, spans)
                     sub = ilib.frame_from_spans(tdf, keep)
@@ -138,7 +154,7 @@ def main() -> int:
                         )
                     )
                 except Exception:
-                    pass
+                    raise RuntimeError("response feature extraction failed") from None
 
             # Learning-objective difficulty prior, from TRAINING data only.
             # Must match the training-time feature name exactly (see models/gbdt.py).
@@ -146,6 +162,7 @@ def main() -> int:
             feats["lo_prior_enc"] = float(lo_prior.get(str(lo_id), fallback))
             feats["response_id"] = r["response_id"]
             feats["_lo_id"] = lo_id
+            feats["_use_fallback"] = not transcript_ok
             rows.append(feats)
     log("features extracted")
 
@@ -163,6 +180,7 @@ def main() -> int:
         pass
 
     lo_ids = X.pop("_lo_id").to_numpy() if "_lo_id" in X.columns else None
+    use_fallback = X.pop("_use_fallback").to_numpy(dtype=bool)
     ids = X.pop("response_id").to_numpy()
     for c in feature_cols:
         if c not in X.columns:
@@ -179,8 +197,19 @@ def main() -> int:
 
     # ---- predict: average the per-fold boosters -----------------------------
     preds = np.zeros(len(X), dtype=float)
-    for b in boosters:
-        preds = preds + np.asarray(b.predict(X), dtype=float)
+    needs_lo_prior = "lo_prior_enc" in feature_cols
+    if needs_lo_prior and len(lo_prior_by_booster) != len(boosters):
+        raise RuntimeError("fold-specific LO-prior artifacts do not match the boosters")
+    if needs_lo_prior and lo_ids is None:
+        raise RuntimeError("learning-objective ids are missing")
+    for i, b in enumerate(boosters):
+        X_fold = X
+        if needs_lo_prior:
+            X_fold = X.copy()
+            X_fold["lo_prior_enc"] = ilib.lo_prior_values(
+                lo_ids, lo_prior_by_booster[i]
+            )
+        preds = preds + np.asarray(b.predict(X_fold), dtype=float)
     preds = preds / max(len(boosters), 1)
     log("model predicted")
 
@@ -188,8 +217,10 @@ def main() -> int:
         # plain-number calibrator: pure arithmetic, no sklearn object to unpickle
         preds = ilib.apply_calibration(calibrator, preds, eps=EPS)
 
-    # Rows whose transcript was unreadable fall back to the LO prior, then the global prior.
-    bad = ~np.isfinite(preds)
+    # Rows whose transcript was missing/unreadable/empty use the LO prior exactly. Do not
+    # rely on LightGBM returning NaN: it normally emits a plausible finite prediction from
+    # an all-NaN feature row.
+    bad = ~np.isfinite(preds) | use_fallback
     if bad.any():
         if lo_ids is not None and lo_prior:
             preds[bad] = [float(lo_prior.get(str(v), fallback)) for v in lo_ids[bad]]

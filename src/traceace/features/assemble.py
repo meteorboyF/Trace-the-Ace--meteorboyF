@@ -126,8 +126,30 @@ def build_matrix(
     for name in blocks:
         df = load_block(name, subsample=subsample)
         _, _, key = BLOCKS[name]
+        if key not in df.columns:
+            raise KeyError(f"feature block {name!r} is missing join key {key!r}")
+        if df[key].isna().any():
+            raise RuntimeError(f"feature block {name!r} has null {key!r} values")
+        if df[key].duplicated().any():
+            raise RuntimeError(
+                f"feature block {name!r} has duplicate {key!r} values; "
+                "joining it would duplicate training rows"
+            )
         drop = [c for c in df.columns if c in out.columns and c != key]
-        out = out.merge(df.drop(columns=drop), on=key, how="left")
+        before = len(out)
+        new_cols = [c for c in df.columns if c != key and c not in drop]
+        out = out.merge(df.drop(columns=drop), on=key, how="left", validate="many_to_one")
+        if len(out) != before:
+            raise RuntimeError(
+                f"feature block {name!r} changed row count {before} -> {len(out)}"
+            )
+        if new_cols:
+            missing = out[new_cols].isna().all(axis=1)
+            if missing.any():
+                raise RuntimeError(
+                    f"feature block {name!r} is absent for {int(missing.sum())}/{len(out)} "
+                    "rows; caches and CV likely used different session cohorts"
+                )
         log.info("assemble: joined block %s on %s (%d cols)", name, key, df.shape[1] - 1)
 
     feat_cols = [c for c in out.columns if c not in NON_FEATURE]

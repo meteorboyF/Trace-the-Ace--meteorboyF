@@ -112,7 +112,7 @@ def normalize_frame(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("session_id", "utterance_id", "role", "content", "timestamp"):
         if col not in df.columns:
             df[col] = pd.NA
-    df["role"] = df["role"].astype("string").str.strip().str.lower()
+    df["role"] = df["role"].astype("string").fillna("unknown").str.strip().str.lower()
     df["content"] = df["content"].astype("string").fillna("")
     df["utterance_idx"] = pd.to_numeric(df["utterance_id"], errors="coerce")
     df["t_seconds"] = df["timestamp"].map(parse_elapsed_seconds)
@@ -955,6 +955,13 @@ def frame_from_spans(df: pd.DataFrame, spans: list[tuple[int, int]]) -> pd.DataF
         return df.iloc[0:0]
     parts = [df.iloc[s:e] for s, e in spans]
     return pd.concat(parts) if len(parts) > 1 else parts[0]
+
+
+def lo_prior_values(lo_ids: np.ndarray, spec: dict[str, Any]) -> np.ndarray:
+    """Apply one booster's training-fold LO target-encoding map."""
+    values = dict(spec.get("values", {}))
+    fallback = float(spec["fallback"])
+    return np.asarray([float(values.get(str(value), fallback)) for value in lo_ids], dtype=float)
 
 
 # ---------------------------------------------------------------------------

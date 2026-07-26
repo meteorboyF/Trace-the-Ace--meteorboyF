@@ -34,6 +34,8 @@ never blocked on a GPU.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -74,13 +76,38 @@ def fit_lo_vectorizer(force: bool = False) -> TfidfVectorizer:
     against transcript windows.
     """
     import joblib
+    import sklearn
 
     path = vectorizer_path()
-    if path.is_file() and not force:
-        return joblib.load(path)
-
     feats = load_train_features()
     lo_texts = feats["learning_objective"].dropna().astype(str).drop_duplicates().tolist()
+    recipe = {
+        "lowercase": True,
+        "stop_words": "english",
+        "ngram_range": [1, 2],
+        "min_df": 1,
+        "sublinear_tf": True,
+        "input_sha256": hashlib.sha256(
+            json.dumps(sorted(lo_texts), ensure_ascii=False).encode("utf-8")
+        ).hexdigest(),
+    }
+    if path.is_file() and not force:
+        # Older artifacts stored the estimator alone, so re-pickling under the current
+        # environment could hide the sklearn version it was actually fitted with.
+        import warnings
+
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            cached = joblib.load(path)
+        if (
+            isinstance(cached, dict)
+            and cached.get("sklearn_version") == sklearn.__version__
+            and cached.get("recipe") == recipe
+            and isinstance(cached.get("vectorizer"), TfidfVectorizer)
+        ):
+            return cached["vectorizer"]
+        log.warning("LO vectorizer provenance is stale or unknown; refitting")
+
     vec = TfidfVectorizer(
         lowercase=True,
         stop_words="english",
@@ -90,7 +117,14 @@ def fit_lo_vectorizer(force: bool = False) -> TfidfVectorizer:
     )
     vec.fit(lo_texts)
     path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(vec, path)
+    joblib.dump(
+        {
+            "vectorizer": vec,
+            "sklearn_version": sklearn.__version__,
+            "recipe": recipe,
+        },
+        path,
+    )
     log.info("fit LO tf-idf vectorizer on %d unique LO texts -> %s", len(lo_texts), path)
     return vec
 

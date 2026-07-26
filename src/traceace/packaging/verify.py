@@ -381,8 +381,11 @@ def verify_feature_order(workdir: Path, result: VerifyResult) -> None:
 
 
 def verify_prediction_sanity(
-    result: VerifyResult, n_sessions: int = 300, max_logloss: float = 0.50
-) -> None:
+    result: VerifyResult,
+    zip_path: Path | None = None,
+    n_sessions: int = 300,
+    max_logloss: float = 0.50,
+) -> Path | None:
     """Run the PACKAGED main.py on TRAINING data and check the predictions are sane.
 
     Every other check inspects structure. This one asks the only question that actually
@@ -399,18 +402,16 @@ def verify_prediction_sanity(
     import sys
     import zipfile
 
-    import joblib
-
     from ..evaluate import auc as _auc
     from ..evaluate import logloss as _logloss
     from ..io import LABEL_COL, load_train_features, load_train_labels
     from ..paths import transcripts_dir
 
     sdir = submission_dir()
-    zpath = sdir / "submission.zip"
+    zpath = zip_path or (sdir / "submission.zip")
     if not zpath.is_file():
-        result.add("prediction_sanity", False, "submission.zip missing")
-        return
+        result.add("prediction_sanity", False, f"{zpath.name} missing")
+        return None
 
     work = sdir / "_sanity"
     shutil.rmtree(work, ignore_errors=True)
@@ -436,7 +437,7 @@ def verify_prediction_sanity(
     )
     if proc.returncode != 0:
         result.add("prediction_sanity", False, f"main.py exited {proc.returncode}")
-        return
+        return work
 
     got = pd.read_csv(work / "submission.csv", dtype={"response_id": str})
     truth = labels.set_index("response_id")[LABEL_COL]
@@ -444,7 +445,7 @@ def verify_prediction_sanity(
     got = got.dropna(subset=["y"])
     if len(got) < 50:
         result.add("prediction_sanity", False, "too few scorable rows")
-        return
+        return work
 
     y = got["y"].to_numpy()
     p = got["probability"].to_numpy()
@@ -464,8 +465,21 @@ def verify_prediction_sanity(
         abs(float(p.mean()) - base) < 0.10,
         f"mean_pred={p.mean():.4f} vs training base rate {base:.4f}",
     )
-    # joblib import kept for symmetry with other checks
-    del joblib
+    return work
+
+
+def _extract_for_structural_checks(zip_path: Path, work: Path) -> Path | None:
+    """Extract the exact archive under review into a fresh directory."""
+    import shutil
+
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(work)
+    except (FileNotFoundError, zipfile.BadZipFile):
+        return None
+    return work
 
 
 def verify_no_cross_row_features(workdir: Path, result: VerifyResult) -> None:
@@ -477,20 +491,12 @@ def verify_no_cross_row_features(workdir: Path, result: VerifyResult) -> None:
     """
     import joblib
 
-    from ..features.assemble import CROSS_ROW_FEATURES, cross_row_allowed
+    from ..features.assemble import CROSS_ROW_FEATURES
 
     bundle_path = workdir / "assets" / "model.joblib"
     if not bundle_path.is_file():
         return
     used = set(joblib.load(bundle_path)["feature_cols"]) & set(CROSS_ROW_FEATURES)
-    if cross_row_allowed():
-        result.add(
-            "no_cross_row_features",
-            True,
-            f"cross-row aggregates EXPLICITLY ENABLED ({len(used)} in use) — valid only if "
-            "the organizers have confirmed this is permitted",
-        )
-        return
     result.add(
         "no_cross_row_features",
         not used,
@@ -532,8 +538,9 @@ def verify(
 ) -> dict[str, Any]:
     sdir = submission_dir()
     result = VerifyResult()
+    zip_path = sdir / zip_name
 
-    sources = verify_zip(sdir / zip_name, result)
+    sources = verify_zip(zip_path, result)
 
     # --- static scans over every python file we ship ------------------------
     all_leaks: list[str] = []
@@ -551,13 +558,13 @@ def verify(
         "no_network_imports", not all_net, "; ".join(all_net[:6]) or "no network-capable imports"
     )
 
-    # Feature-coverage + rules checks run against the unpacked smoke workdir.
-    smoke_dir = sdir / "_smoke"
-    if smoke_dir.is_dir():
-        verify_feature_coverage(smoke_dir, result)
-        verify_no_cross_row_features(smoke_dir, result)
-        verify_sklearn_version(smoke_dir, result)
-        verify_feature_order(smoke_dir, result)
+    # Bundle checks must inspect the EXACT archive named above, never a persistent
+    # _smoke directory left by an older build.
+    bundle_dir = _extract_for_structural_checks(zip_path, sdir / "_verify")
+    if bundle_dir is not None:
+        verify_no_cross_row_features(bundle_dir, result)
+        verify_sklearn_version(bundle_dir, result)
+        verify_feature_order(bundle_dir, result)
 
     main_src = sources.get("main.py", "")
     result.add(
@@ -580,9 +587,11 @@ def verify(
             f"{csv_path} not found (run submission.smoke to produce one)",
         )
 
-    # The end-to-end sanity check: does the shipped artifact actually predict?
+    # The end-to-end sanity check: does THIS shipped artifact actually predict?
     if check_predictions:
-        verify_prediction_sanity(result)
+        runtime_dir = verify_prediction_sanity(result, zip_path=zip_path)
+        if runtime_dir is not None:
+            verify_feature_coverage(runtime_dir, result)
 
     payload = result.to_dict()
     out = sdir / "verify_report.json"

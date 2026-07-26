@@ -21,7 +21,7 @@ from typing import Any
 import pandas as pd
 
 from .cache import is_cached
-from .io import write_parquet
+from .io import subsample_session_ids, write_parquet
 from .logging_utils import get_logger
 from .paths import interim_dir, iter_files, raw_dir, raw_file, transcripts_dir
 from .progress import pbar
@@ -206,7 +206,8 @@ def consolidate(force: bool = False, subsample: int | None = None) -> dict[str, 
     tdir = transcripts_dir()
     files = list(iter_files(tdir, "*.csv"))
     if subsample is not None:
-        files = files[:subsample]
+        selected = set(subsample_session_ids(subsample))
+        files = [path for path in files if path.stem in selected]
     if not files:
         raise FileNotFoundError(f"no transcript CSVs under {tdir} (did staging run?)")
 
