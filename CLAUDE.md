@@ -20,6 +20,18 @@
   Idle attached GPUs are the #1 unit waste. Frozen embeddings extracted once on L4, cached forever.
 - **Fail fast and loud on bad config.** Never silently default.
 
+## ⛔ Competition-data handling (rules, not preference)
+Participants *"agree not to transmit, duplicate, publish, redistribute or otherwise provide or
+make available the Data to any party not participating in the Competition"*, and *"no
+competition data should be uploaded to an API"*.
+
+**Practical consequence for how this repo is worked on:** do **not** print verbatim transcript
+content, learning-objective text, or student/tutor utterances into terminal output, notebooks,
+or any assistant context. Work from **aggregates** (counts, rates, distributions) instead.
+When a data question needs examples, compute the statistic rather than displaying the text.
+Closed/hosted models may not be used to develop the solution either — see
+[`docs/EXTERNAL_ASSETS.md`](docs/EXTERNAL_ASSETS.md).
+
 ## License allowlist (external models/datasets)
 Must permit **commercial use**. Apache-2.0 and MIT are safe (Qwen, Mistral, ModernBERT, DeBERTa).
 **No** NC / CC BY-NC / research-only terms. Flag bespoke community licenses in

@@ -10,9 +10,35 @@ acceptable** ("sufficiently open to meet the requirement"). Our earlier allowlis
 / MIT only) was stricter than the rules require. ShareAlike does **not** conflict with the
 MIT winner requirement when the data is never part of the submitted code or model.
 
-**Hard prohibition (same thread):** *"competition data can not be uploaded to an API."*
-Any annotation of transcripts must run locally or on cloud compute we control — never through
-a hosted LLM API. See ADR-004 and ADR-011.
+### Two organizer rulings that define the boundary (forum, 2026-06-25, `kwetstone`)
+
+**1. Bundling open weights offline is explicitly endorsed.**
+> *"Yes. That is exactly how you should bring in and use open-weight models in your solution.
+> Keep in mind the runtime constraints: the environment has no network access, so all required
+> model assets must be included in your submission, and your model must fit within the
+> documented RAM/VRAM limits."*
+
+✅ Green light for vendoring `bge-small-en-v1.5` (MIT) or any Apache-2.0/MIT encoder into
+`submission.zip`. Constraints: vendor **every** asset (no network), fit 80 GB VRAM / 220 GB RAM,
+stay under the 60 GB zip cap.
+
+**2. Closed/hosted models are prohibited *even at development time*.**
+> *"Train-time annotation with a hosted/closed model would not be allowed under the current
+> rules... The open license limitation applies both to final models and to development."*
+
+🚫 This is **stricter than a data-transmission rule**. It is not merely "don't upload data to
+an API" — a closed model may not be used to develop the solution *at all*, including to produce
+training-time annotations that never ship. Two independent prohibitions therefore apply to the
+hosted-API annotation idea: the licence rule *and*
+
+> *"no competition data should be uploaded to an API"* — participants *"agree not to transmit,
+> duplicate, publish, redistribute or otherwise provide or make available the Data to any party
+> not participating in the Competition."*
+
+**Consequence for `annotate.moves`:** the `vllm` backend with `Qwen/Qwen2.5-7B-Instruct`
+(Apache-2.0, run locally) is **confirmed compliant** — open licence, local execution, no data
+leaves our control. ADR-004 chose this for cost/risk reasons; both rulings now make it the only
+permissible path. Any hosted API backend is prohibited and must never be added.
 
 ---
 

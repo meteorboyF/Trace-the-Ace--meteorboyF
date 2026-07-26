@@ -69,6 +69,15 @@ join to the feature assembly path.
 
 ## ADR-004 — 2026-07-25 — No generative model in the inference path (dev-time annotation instead)
 
+> **CONFIRMED 2026-07-27 by two organizer rulings.** (a) Bundling open weights for offline
+> inference is *"exactly how you should bring in and use open-weight models"*. (b) Closed/hosted
+> models are prohibited **even at development time** — *"the open license limitation applies both
+> to final models and to development"* — independently of the separate prohibition on uploading
+> competition data to an API. Our choice of local vLLM + Apache-2.0 Qwen2.5 was made on cost and
+> risk grounds; it is now the only permissible path. A hosted-API annotation backend must never
+> be added to `annotate.moves`.
+
+
 **Context.** A tutoring-move taxonomy is one of three named research directions, and LLM
 labelling is the natural way to build one. But putting a generative model in the
 submission means vendoring multi-GB weights, a vLLM dependency, and far more runtime risk
