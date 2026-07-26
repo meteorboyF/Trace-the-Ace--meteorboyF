@@ -23,8 +23,6 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
 from ..config import get_config
 from ..evaluate import experiment_dir
 from ..io import LABEL_COL, load_train
@@ -51,12 +49,29 @@ def _collect_boosters(experiment: str) -> list[Any]:
     return [lgb.Booster(model_file=str(f)) for f in files]
 
 
-def _feature_cols(experiment: str) -> list[str]:
-    imp = experiment_dir(experiment, None) / "importance.parquet"
-    if not imp.is_file():
-        raise FileNotFoundError(f"{imp} missing — run the model task first")
-    # importance.parquet lists every training feature, in the training order
-    return pd.read_parquet(imp)["feature"].tolist()
+def _feature_cols(experiment: str, boosters: list[Any]) -> list[str]:
+    """The EXACT feature order the boosters were trained on.
+
+    Taken from ``booster.feature_name()`` — the model's own record — because it cannot
+    drift from the model by construction.
+
+    **This function previously read ``importance.parquet``, which is sorted by gain
+    descending.** That silently shipped a permutation: 179 of 181 positions differed from
+    the training order, `main.py` reordered the columns to match, and LightGBM read them
+    positionally. Every feature was scrambled. Predictions stayed confident and
+    well-formatted, so all 20 verify checks passed — and the leaderboard came back at AUC
+    0.4933, below random. Never derive feature order from anything but the model.
+    """
+    if not boosters:
+        raise ValueError("no boosters supplied")
+    names = list(boosters[0].feature_name())
+    for i, b in enumerate(boosters[1:], start=1):
+        if list(b.feature_name()) != names:
+            raise RuntimeError(
+                f"booster {i} has a different feature order than booster 0 — "
+                "the folds were not trained on the same design matrix"
+            )
+    return names
 
 
 def _lo_prior(smoothing: float = 20.0) -> dict[str, float]:
@@ -103,7 +118,7 @@ def build(
 
     # --- model bundle -------------------------------------------------------
     boosters = _collect_boosters(experiment)
-    feature_cols = _feature_cols(experiment)
+    feature_cols = _feature_cols(experiment, boosters)
     # Ship the PLAIN-NUMBER calibrator, never the fitted sklearn estimator: the runtime's
     # scikit-learn version differs from ours and unpickling across versions warns of
     # "invalid results" (observed in a container smoke test, 2026-07-27).

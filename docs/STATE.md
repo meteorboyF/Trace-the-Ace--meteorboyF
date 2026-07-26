@@ -21,8 +21,18 @@
 Smoke scores (0.8543, 0.8330) are on **fake data** and carry no signal — our model predicts
 ~0.70 against roughly balanced random labels, which lands right about there.
 
-⏳ **The NORMAL submission has not been made yet.** That is the next action, and it is the
-only remaining unknown: where 0.5436 sits on the real leaderboard.
+🔴 **SUBMISSION 1 (id-2723) SCORED 0.8006 / AUROC 0.4933 — rank #229. It was BROKEN, not
+merely weak.** A feature-ORDER bug shipped a scrambled design matrix: the bundle took its
+column list from `importance.parquet` (sorted by gain), which permuted 179 of 181 positions
+against the training order, and LightGBM reads positionally. Every structural check passed.
+Fixed in ADR-013; verify now runs the packaged `main.py` against training data and requires
+log loss ≤ 0.50 / AUC ≥ 0.75.
+
+Local proof of the fix (packaged `main.py` on training data):
+`0.80867 / AUC 0.4738` → **`0.43927` / AUC 0.8291**, mean prediction 0.49 → 0.735 against a
+0.7025 base rate.
+
+⏳ **Submission 2 pending** with the fixed artifact. **2 slots left this week.**
 
 ✅ **Cross-row rules question: SETTLED 2026-07-27.** Already answered on the forum — cross-row
 features are prohibited, our default was correct, nothing to post. +0.00251 permanently

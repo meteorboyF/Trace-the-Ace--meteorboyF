@@ -169,6 +169,14 @@ def main() -> int:
             X[c] = np.nan
     X = X[feature_cols].astype("float64")
 
+    # Column order MUST match what each booster was trained on. LightGBM reads a
+    # DataFrame positionally, so a permutation is silent and catastrophic — it cost us a
+    # leaderboard submission at AUC 0.4933. Fail loudly instead.
+    for b in boosters:
+        bn = list(b.feature_name())
+        if bn != feature_cols:
+            raise RuntimeError("feature order does not match the trained booster")
+
     # ---- predict: average the per-fold boosters -----------------------------
     preds = np.zeros(len(X), dtype=float)
     for b in boosters:

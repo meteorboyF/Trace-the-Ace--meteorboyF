@@ -347,6 +347,127 @@ def verify_sklearn_version(workdir: Path, result: VerifyResult) -> None:
         )
 
 
+def verify_feature_order(workdir: Path, result: VerifyResult) -> None:
+    """Assert the bundle's feature order equals what the boosters were trained on.
+
+    **The check that was missing when it mattered.** The bundle's ``feature_cols`` was read
+    from ``importance.parquet``, which is sorted by gain — a permutation of the training
+    order in 179 of 181 positions. ``main.py`` reordered the columns to match, LightGBM read
+    them positionally, and every feature was scrambled. Predictions remained confident and
+    correctly formatted, so all 20 checks passed; the leaderboard returned AUC 0.4933.
+    """
+    import joblib
+
+    bundle_path = workdir / "assets" / "model.joblib"
+    if not bundle_path.is_file():
+        return
+    bundle = joblib.load(bundle_path)
+    cols = list(bundle["feature_cols"])
+    boosters = bundle.get("boosters") or []
+    if not boosters:
+        result.add("feature_order_matches_booster", False, "no boosters in bundle")
+        return
+    mismatches = []
+    for i, b in enumerate(boosters):
+        bn = list(b.feature_name())
+        if bn != cols:
+            n_diff = sum(1 for a, c in zip(bn, cols) if a != c)
+            mismatches.append(f"booster{i}: {n_diff}/{len(bn)} positions differ")
+    result.add(
+        "feature_order_matches_booster",
+        not mismatches,
+        "; ".join(mismatches) if mismatches else f"all {len(boosters)} boosters agree",
+    )
+
+
+def verify_prediction_sanity(
+    result: VerifyResult, n_sessions: int = 300, max_logloss: float = 0.50
+) -> None:
+    """Run the PACKAGED main.py on TRAINING data and check the predictions are sane.
+
+    Every other check inspects structure. This one asks the only question that actually
+    matters: **does the shipped artifact predict correctly?** The model was trained on these
+    rows, so log loss must be clearly better than the 0.609 global prior and AUC well above
+    chance. A scrambled, degraded or misaligned pipeline fails here even when every
+    structural check passes — which is exactly what happened.
+
+    Deliberately uses training data: it is the only data whose labels we hold, and a model
+    that cannot fit data it was trained on is broken regardless of the test distribution.
+    """
+    import shutil
+    import subprocess
+    import sys
+    import zipfile
+
+    import joblib
+
+    from ..evaluate import auc as _auc
+    from ..evaluate import logloss as _logloss
+    from ..io import LABEL_COL, load_train_features, load_train_labels
+    from ..paths import transcripts_dir
+
+    sdir = submission_dir()
+    zpath = sdir / "submission.zip"
+    if not zpath.is_file():
+        result.add("prediction_sanity", False, "submission.zip missing")
+        return
+
+    work = sdir / "_sanity"
+    shutil.rmtree(work, ignore_errors=True)
+    (work / "data" / "test_transcripts").mkdir(parents=True)
+    with zipfile.ZipFile(zpath) as zf:
+        zf.extractall(work)
+
+    feats = load_train_features()
+    labels = load_train_labels()
+    sess = feats["session_id"].drop_duplicates().head(n_sessions)
+    sample = feats[feats["session_id"].isin(sess)].copy()
+    for sid in sample["session_id"].unique():
+        src = transcripts_dir() / f"{sid}.csv"
+        if src.is_file():
+            shutil.copyfile(src, work / "data" / "test_transcripts" / f"{sid}.csv")
+    sample.to_csv(work / "data" / "test_features.csv", index=False)
+    pd.DataFrame({"response_id": sample["response_id"], "probability": 0.5}).to_csv(
+        work / "data" / "submission_format.csv", index=False
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "main.py"], cwd=work, capture_output=True, text=True, timeout=1800
+    )
+    if proc.returncode != 0:
+        result.add("prediction_sanity", False, f"main.py exited {proc.returncode}")
+        return
+
+    got = pd.read_csv(work / "submission.csv", dtype={"response_id": str})
+    truth = labels.set_index("response_id")[LABEL_COL]
+    got["y"] = got["response_id"].map(truth)
+    got = got.dropna(subset=["y"])
+    if len(got) < 50:
+        result.add("prediction_sanity", False, "too few scorable rows")
+        return
+
+    y = got["y"].to_numpy()
+    p = got["probability"].to_numpy()
+    ll, au = _logloss(y, p), _auc(y, p)
+    # the model saw these rows in training, so it should fit them well
+    ok = ll <= max_logloss and au >= 0.75
+    result.add(
+        "prediction_sanity",
+        ok,
+        f"on TRAINING data: logloss={ll:.5f} (need <={max_logloss}), auc={au:.4f} "
+        f"(need >=0.75), mean_pred={p.mean():.4f}",
+    )
+    # a mean far from the training base rate is itself a red flag
+    base = float(labels[LABEL_COL].mean())
+    result.add(
+        "prediction_mean_near_base_rate",
+        abs(float(p.mean()) - base) < 0.10,
+        f"mean_pred={p.mean():.4f} vs training base rate {base:.4f}",
+    )
+    # joblib import kept for symmetry with other checks
+    del joblib
+
+
 def verify_no_cross_row_features(workdir: Path, result: VerifyResult) -> None:
     """Assert the shipped model uses no feature derived from OTHER test rows.
 
@@ -407,6 +528,7 @@ def verify(
     smoke: bool = False,
     strict: bool = True,
     n_log_lines: int | None = None,
+    check_predictions: bool = True,
 ) -> dict[str, Any]:
     sdir = submission_dir()
     result = VerifyResult()
@@ -435,6 +557,7 @@ def verify(
         verify_feature_coverage(smoke_dir, result)
         verify_no_cross_row_features(smoke_dir, result)
         verify_sklearn_version(smoke_dir, result)
+        verify_feature_order(smoke_dir, result)
 
     main_src = sources.get("main.py", "")
     result.add(
@@ -456,6 +579,10 @@ def verify(
             False,
             f"{csv_path} not found (run submission.smoke to produce one)",
         )
+
+    # The end-to-end sanity check: does the shipped artifact actually predict?
+    if check_predictions:
+        verify_prediction_sanity(result)
 
     payload = result.to_dict()
     out = sdir / "verify_report.json"

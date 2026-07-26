@@ -224,6 +224,12 @@ def train(
     imp_path = experiment_dir(experiment, subsample, cv_seed) / "importance.parquet"
     write_parquet(imp_summary, imp_path)
 
+    # Persist the TRAINING COLUMN ORDER separately. importance.parquet is sorted by gain
+    # and must never be used as an order source (see packaging/build_submission._feature_cols).
+    (experiment_dir(experiment, subsample, cv_seed) / "feature_order.json").write_text(
+        json.dumps(list(feat_cols), indent=0)
+    )
+
     res = score_frame(frame, experiment, subsample=subsample, cv_seed=cv_seed)
     res.update(
         {

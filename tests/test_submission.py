@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import textwrap
+
 import numpy as np
 import pandas as pd
 
@@ -159,3 +161,73 @@ def test_classify_csv_by_content_shape(tmp_path):
     g = tmp_path / "other.csv"
     g.write_text("response_id,is_correct\na,1.0\n")
     assert _classify_csv(g) == "train_labels"
+
+
+# --- feature ORDER: regression test for the bug that cost a leaderboard slot ---
+def test_feature_order_must_come_from_the_booster_not_importance():
+    """The bundle's feature order must be read from the model, never from a sorted table.
+
+    Regression test. `_feature_cols` read `importance.parquet`, which is sorted by gain
+    descending — a permutation of the training order in 179 of 181 positions. `main.py`
+    reordered the columns to match and LightGBM read them positionally, scrambling every
+    feature. Predictions stayed confident and correctly formatted, so all 20 verify checks
+    passed. The leaderboard returned AUC 0.4933, below random.
+    """
+    import ast
+    import inspect
+
+    from traceace.packaging import build_submission
+
+    src = inspect.getsource(build_submission._feature_cols)
+    assert "feature_name()" in src, "feature order must come from booster.feature_name()"
+
+    # Inspect the CODE only — the docstring deliberately names importance.parquet to
+    # explain why it must never be used, and matching that text is a false positive.
+    tree = ast.parse(textwrap.dedent(src))
+    fn = tree.body[0]
+    body = fn.body[1:] if ast.get_docstring(fn) else fn.body
+    code = "\n".join(ast.unparse(node) for node in body)
+    assert "importance.parquet" not in code, (
+        "importance.parquet is sorted by gain and must never be an order source"
+    )
+
+
+def test_main_py_asserts_feature_order_at_runtime():
+    """main.py must refuse to predict if the column order disagrees with the booster."""
+    from traceace.packaging.main_template import MAIN_TEMPLATE
+
+    assert "feature_name()" in MAIN_TEMPLATE
+    assert "feature order does not match the trained booster" in MAIN_TEMPLATE
+
+
+def test_scrambled_feature_order_is_detected(synth_repo):
+    """A permuted feature order must be caught by verify, not shipped."""
+    import lightgbm as lgb
+    import numpy as np
+
+    from traceace.packaging.verify import VerifyResult, verify_feature_order
+
+    rng = np.random.default_rng(0)
+    cols = [f"f{i}" for i in range(8)]
+    X = pd.DataFrame(rng.normal(size=(200, 8)), columns=cols)
+    y = (X["f0"] + X["f1"] > 0).astype(int)
+    booster = lgb.train({"objective": "binary", "verbose": -1}, lgb.Dataset(X, label=y), 5)
+
+    import joblib
+
+    work = synth_repo / "wk"
+    (work / "assets").mkdir(parents=True)
+
+    # correct order -> passes
+    joblib.dump({"feature_cols": cols, "boosters": [booster]}, work / "assets" / "model.joblib")
+    ok = VerifyResult()
+    verify_feature_order(work, ok)
+    assert ok.ok, [c.detail for c in ok.failures]
+
+    # permuted order -> must FAIL
+    joblib.dump(
+        {"feature_cols": cols[::-1], "boosters": [booster]}, work / "assets" / "model.joblib"
+    )
+    bad = VerifyResult()
+    verify_feature_order(work, bad)
+    assert not bad.ok, "a permuted feature order must be rejected"

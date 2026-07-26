@@ -323,3 +323,53 @@ leaves us exposed if the organizers update the image mid-competition.
 ±0.00055 noise band, and the winning calibrator flipped Platt → none — itself consistent with
 the earlier finding that the Platt gain (+0.000058) was noise. Verify now runs 20 checks.
 **Standing rule: read smoke-test warnings, not just exit codes.**
+
+
+---
+
+## ADR-013 — 2026-07-27 — Feature order comes from the model, and verify predicts before shipping
+
+**Context.** Our first real submission scored **0.8006 log loss / 0.4933 AUROC, rank #229** —
+AUC *below random*, and log loss worse than the 0.609 global prior, against a CV of 0.5436 /
+0.7223.
+
+The cause: ``build_submission._feature_cols`` read the column list from
+``importance.parquet``, which ``model.gbdt`` writes **sorted by gain descending**. That is a
+permutation of the training order in **179 of 181 positions**. ``main.py`` faithfully
+reordered its computed columns to match, LightGBM read the DataFrame positionally, and every
+feature was scrambled — the model saw `struct_n_utterances` where it expected `lo_prior_enc`,
+and so on for 179 columns.
+
+Nothing looked wrong. Predictions were confident, in range, correctly formatted, correctly
+ordered against `submission_format.csv`, with all 181 feature names present. **All 20 verify
+checks passed.** Reproduced locally in seconds once we ran the packaged `main.py` against
+training data: log loss 0.80867, AUC 0.4738, mean prediction 0.4901 against a base rate of
+0.7025.
+
+**Decisions.**
+
+1. **Feature order is read from ``booster.feature_name()``** — the model's own record, which
+   cannot drift from the model by construction. All boosters are cross-checked against each
+   other. ``importance.parquet`` is never an order source; the training order is *also*
+   persisted separately to ``feature_order.json`` as an independent record.
+2. **``main.py`` asserts the order at runtime** and raises rather than predicting if the
+   bundle disagrees with any booster.
+3. **``submission.verify`` gained two checks**, one structural and one behavioural:
+   - ``verify_feature_order`` — bundle order must equal every booster's order.
+   - ``verify_prediction_sanity`` — **runs the packaged ``main.py`` on real training data and
+     requires log loss ≤ 0.50 and AUC ≥ 0.75**, plus a mean prediction within 0.10 of the
+     training base rate. The model was trained on those rows; if it cannot fit them, the
+     artifact is broken regardless of how well-formed its output is.
+
+**Alternatives rejected.** Passing a numpy array in booster order — works, but hides the
+mismatch instead of surfacing it. Trusting the name-based checks we already had — they
+verified *presence*, and this bug was purely about *order*.
+
+**Consequences.** After the fix, the same probe returns log loss **0.43927**, AUC **0.8291**,
+mean **0.7349**. Verify now runs 23 checks. Three regression tests pin the behaviour,
+including one that builds a real booster and asserts a permuted order is rejected.
+
+**The lesson, stated plainly.** Our checks had drifted toward verifying *structure*: the file
+exists, the columns are present, the rows align, the probabilities are in range. None of them
+asked whether the thing *works*. Every verification suite needs at least one check that
+exercises the artifact end-to-end against known answers.
