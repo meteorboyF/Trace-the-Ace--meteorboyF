@@ -15,11 +15,11 @@
 features are prohibited, our default was correct, nothing to post. +0.00251 permanently
 forfeit. See [`FORUM_QUESTION.md`](FORUM_QUESTION.md).
 
-⚠️ **NEW OPEN QUESTION — worth asking before the write-up.** The organizers have twice said
-the open-licensing requirement covers *"models used for development"*. Whether that includes AI
-**coding assistants** is unresolved, and it bears on this project's working method. A drafted
-question + disclosure is in [`OPEN_QUESTION_ai_assistant.md`](OPEN_QUESTION_ai_assistant.md).
-Raised proactively by the assistant; recommend posting alongside your other questions.
+ℹ️ **AI-assistant licensing question: considered and closed 2026-07-27** — treated as
+development tooling, not a model contributing content to the solution. Reasoning recorded in
+[`OPEN_QUESTION_ai_assistant.md`](OPEN_QUESTION_ai_assistant.md); not posted. The data-handling
+practice tightened at the same time stands regardless: no verbatim transcript text in terminal
+output or assistant context, aggregates only (see `CLAUDE.md`).
 
 ⚠️ **Two things need YOU, not me:**
 1. **Submit** — see [`RUNBOOK.md`](RUNBOOK.md) "Submitting for real". I cannot submit on your

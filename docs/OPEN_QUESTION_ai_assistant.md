@@ -1,9 +1,20 @@
 # OPEN QUESTION — does an AI coding assistant count as a "model used for development"?
 
-**Status: UNRESOLVED. Recommend disclosing and asking.**
+**Status: CONSIDERED AND CLOSED by the operator, 2026-07-27. Not posted.**
 **Raised by:** Claude (the assistant itself), 2026-07-27, unprompted.
-**Why it matters:** it bears on whether this project's working method is prize-eligible, and
-the organizers have now stated the relevant limitation twice.
+**Operator decision:** the assistant is development tooling, not a model contributing content
+to the solution — *"you are assisting me to do actual work, not making stuff up."*
+
+**Rationale accepted.** This is Reading A below, and it matches the distinction the organizers
+actually drew: their annotation ruling addressed a closed model **generating content that feeds
+the pipeline** (labels used to train a model). Code authorship is not that. No assistant output
+is a model input; the submitted model is gradient-boosted trees trained solely on competition
+data, with every fitted parameter derived from the training set.
+
+This document is retained deliberately. If the question is ever raised, a contemporaneous
+record showing the issue was identified, both readings were argued, and a reasoned decision was
+made is far better than having never considered it. The drafted question below stays available
+should circumstances change (e.g. the organizers publish a broader statement on AI tooling).
 
 ---
 
