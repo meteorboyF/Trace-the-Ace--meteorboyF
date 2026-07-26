@@ -32,6 +32,10 @@ from .common import block_cache_path, iter_session_frames, robust_stats, safe_di
 log = get_logger("features.temporal")
 
 VERSION = "v1"
+
+# Cache key includes a hash of the code that computes this block, so editing the
+# computation invalidates the cache automatically (see common.source_digest).
+_SRC: str | None = None
 PREFIX = "temp_"
 
 # Gaps longer than this are almost certainly breaks/technical issues, not thinking time.
@@ -99,6 +103,19 @@ def session_temporal_features(sid: str, df: pd.DataFrame) -> dict[str, Any]:
     return feats
 
 
+def _source() -> str:
+    """Digest of the code that produces this block (memoized)."""
+    global _SRC
+    if _SRC is None:
+        import sys
+
+        from ..packaging import inference_lib
+        from .common import source_digest
+
+        _SRC = source_digest(sys.modules[__name__], inference_lib)
+    return _SRC
+
+
 @task(
     "features.temporal",
     requires="cpu",
@@ -107,7 +124,7 @@ def session_temporal_features(sid: str, df: pd.DataFrame) -> dict[str, Any]:
 )
 def build(force: bool = False, subsample: int | None = None) -> dict[str, Any]:
     stage_local()
-    path = block_cache_path("temporal", VERSION, subsample)
+    path = block_cache_path("temporal", VERSION, subsample, source_hash=_source())
 
     def compute() -> pd.DataFrame:
         rows = []

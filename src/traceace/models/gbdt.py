@@ -68,8 +68,7 @@ def _inner_oof_lo_encoding(frame: pd.DataFrame, smoothing: float, seed: int) -> 
     n_inner = min(5, n_groups)
     if n_inner < 2:
         raise ValueError(
-            f"only {n_groups} training session(s); cannot target-encode without "
-            "self-label leakage"
+            f"only {n_groups} training session(s); cannot target-encode without self-label leakage"
         )
     splitter = StratifiedGroupKFold(n_splits=n_inner, shuffle=True, random_state=seed)
     y = frame[LABEL_COL].to_numpy()
@@ -83,10 +82,7 @@ def _inner_oof_lo_encoding(frame: pd.DataFrame, smoothing: float, seed: int) -> 
     for inner_tr_idx, inner_va_idx in splits:
         inner_map, inner_global = _smoothed_map(frame.iloc[inner_tr_idx], smoothing)
         encoded[inner_va_idx] = (
-            frame.iloc[inner_va_idx][LO_COL]
-            .map(inner_map)
-            .fillna(inner_global)
-            .to_numpy()
+            frame.iloc[inner_va_idx][LO_COL].map(inner_map).fillna(inner_global).to_numpy()
         )
     if np.isnan(encoded).any():
         raise RuntimeError("inner target encoding left rows unassigned; refusing to train")
@@ -114,7 +110,9 @@ def _fold_safe_lo_encoding(
     enc = np.full(len(frame), np.nan, dtype=float)
     known_folds = {int(k) for k in frame["fold"].unique()}
     if outer_fold not in known_folds:
-        raise ValueError(f"outer fold {outer_fold} is absent from frame folds {sorted(known_folds)}")
+        raise ValueError(
+            f"outer fold {outer_fold} is absent from frame folds {sorted(known_folds)}"
+        )
 
     tr_mask = (frame["fold"] != outer_fold).to_numpy()
     va_mask = (frame["fold"] == outer_fold).to_numpy()
@@ -214,9 +212,7 @@ def train(
         va = frame["fold"] == k
         if include_lo_prior:
             X = X_base.copy()
-            X[LO_ENC_COL] = _fold_safe_lo_encoding(
-                frame, lo_smoothing, seed, outer_fold=int(k)
-            )
+            X[LO_ENC_COL] = _fold_safe_lo_encoding(frame, lo_smoothing, seed, outer_fold=int(k))
             outer_map, outer_global = _smoothed_map(frame.loc[tr], lo_smoothing)
             fold_lo_priors.append(
                 {

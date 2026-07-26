@@ -44,6 +44,10 @@ from .lo_alignment import _window_texts, _windows
 log = get_logger("features.window_embeddings")
 
 VERSION = "v1"
+
+# Cache key includes a hash of the code that computes this block, so editing the
+# computation invalidates the cache automatically (see common.source_digest).
+_SRC: str | None = None
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 # bge models expect this instruction prefix on the QUERY side only (the LO text).
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
@@ -58,6 +62,19 @@ def _load_model(model_name: str, device: str | None = None):
 
     with heartbeat(f"loading {model_name}"):
         return SentenceTransformer(model_name, device=device)
+
+
+def _source() -> str:
+    """Digest of the code that produces this block (memoized)."""
+    global _SRC
+    if _SRC is None:
+        import sys
+
+        from ..packaging import inference_lib
+        from .common import source_digest
+
+        _SRC = source_digest(sys.modules[__name__], inference_lib)
+    return _SRC
 
 
 @task(
@@ -81,7 +98,7 @@ def build(
     cfg = get_config()
     model_name = model_name or str(cfg.get("embeddings", "alignment_model", default=DEFAULT_MODEL))
     tag = f"{model_name.split('/')[-1]}_{VERSION}"
-    win_path = block_cache_path("window_embeddings", tag, subsample)
+    win_path = block_cache_path("window_embeddings", tag, subsample, source_hash=_source())
     lo_path = lo_embedding_path(tag if subsample is None else f"{tag}_sub{subsample}")
 
     if is_cached(win_path) and lo_path.is_file() and not force:

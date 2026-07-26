@@ -21,17 +21,28 @@ from .common import block_cache_path
 
 log = get_logger("features.assemble")
 
-# block name -> (cache stem, version, join key)
-BLOCKS: dict[str, tuple[str, str, str]] = {
-    "structural": ("structural", "v1", "session_id"),
-    "linguistic": ("linguistic", "v1", "session_id"),
-    "temporal": ("temporal", "v1", "session_id"),
-    "lo_alignment": ("lo_alignment", "v1_lexical", "response_id"),
-    "feedback": ("feedback", "v1", "response_id"),
-    "trajectory": ("trajectory", "v1", "response_id"),
+# block name -> (cache stem, version, join key, module that computes it)
+# The module is needed to resolve the source-hash component of the cache path, so a loader
+# and a builder can never disagree about which cache file "the structural block" means.
+BLOCKS: dict[str, tuple[str, str, str, str]] = {
+    "structural": ("structural", "v1", "session_id", "structural"),
+    "linguistic": ("linguistic", "v1", "session_id", "linguistic"),
+    "temporal": ("temporal", "v1", "session_id", "temporal"),
+    "lo_alignment": ("lo_alignment", "v1_lexical", "response_id", "lo_alignment"),
+    "feedback": ("feedback", "v1", "response_id", "feedback"),
+    "trajectory": ("trajectory", "v1", "response_id", "trajectory"),
     # requires features.window_embeddings (GPU, once)
-    "content": ("content", "v1_k48", "response_id"),
+    "content": ("content", "v1_k48", "response_id", "content"),
 }
+
+
+def block_source_hash(name: str) -> str:
+    """Resolve the source-hash cache component for a block, via its owning module."""
+    from importlib import import_module
+
+    mod = import_module(f".{BLOCKS[name][3]}", package=__package__)
+    return str(mod._source())
+
 
 # Block membership is decided ONLY by `interpret.ablation_repeated` (paired leave-one-out
 # across 5 fold assignments, mean ± SD). Single-seed readings below ~1e-3 are noise at this
@@ -103,8 +114,8 @@ NON_FEATURE = {
 def load_block(name: str, subsample: int | None = None) -> pd.DataFrame:
     if name not in BLOCKS:
         raise KeyError(f"unknown feature block {name!r}; known: {sorted(BLOCKS)}")
-    stem, version, _ = BLOCKS[name]
-    path = block_cache_path(stem, version, subsample)
+    stem, version, _, _ = BLOCKS[name]
+    path = block_cache_path(stem, version, subsample, source_hash=block_source_hash(name))
     if not path.is_file():
         raise FileNotFoundError(
             f"feature block {name!r} not built ({path}). Run tasks.run('features.{name}')."
@@ -125,7 +136,7 @@ def build_matrix(
     out = base.copy()
     for name in blocks:
         df = load_block(name, subsample=subsample)
-        _, _, key = BLOCKS[name]
+        _, _, key, _ = BLOCKS[name]
         if key not in df.columns:
             raise KeyError(f"feature block {name!r} is missing join key {key!r}")
         if df[key].isna().any():
@@ -140,9 +151,7 @@ def build_matrix(
         new_cols = [c for c in df.columns if c != key and c not in drop]
         out = out.merge(df.drop(columns=drop), on=key, how="left", validate="many_to_one")
         if len(out) != before:
-            raise RuntimeError(
-                f"feature block {name!r} changed row count {before} -> {len(out)}"
-            )
+            raise RuntimeError(f"feature block {name!r} changed row count {before} -> {len(out)}")
         if new_cols:
             missing = out[new_cols].isna().all(axis=1)
             if missing.any():

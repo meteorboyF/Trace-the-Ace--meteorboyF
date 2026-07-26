@@ -296,3 +296,53 @@ def test_headline_tolerates_distribution_metrics():
     assert "± 0.00050" in dist
 
     assert _pick_headline({"logloss": None, "auc": "n/a"}) == ""
+
+
+def test_cache_key_changes_when_the_computing_code_changes(synth_repo):
+    """Editing a feature computation must invalidate its cache automatically.
+
+    Every block previously keyed its cache on a hand-written VERSION = "v1" that nobody
+    remembered to bump, so editing a feature left the stale parquet in place and
+    `load_or_compute` served it silently — a model trained on features the current code
+    would no longer produce.
+    """
+    import types
+
+    from traceace.features.common import block_cache_path, source_digest
+
+    mod_a = types.ModuleType("m")
+    mod_b = types.ModuleType("m")
+    # source_digest falls back to repr() for modules with no retrievable source, so use
+    # two real objects with genuinely different source instead.
+    import traceace.features.structural as s_mod
+    import traceace.features.temporal as t_mod
+
+    assert source_digest(s_mod) != source_digest(t_mod), "different code must hash differently"
+    assert source_digest(s_mod) == source_digest(s_mod), "hashing must be deterministic"
+
+    h1, h2 = source_digest(s_mod), source_digest(t_mod)
+    p1 = block_cache_path("blk", "v1", None, source_hash=h1)
+    p2 = block_cache_path("blk", "v1", None, source_hash=h2)
+    assert p1 != p2, "a code change must produce a different cache path"
+    del mod_a, mod_b
+
+
+def test_every_block_resolves_the_same_cache_path_for_loader_and_builder(synth_repo):
+    """assemble.load_block and the block's own build() must agree on the cache file.
+
+    If they disagree, the loader silently reads a stale file or raises 'not built' for a
+    block that exists — both were possible before the source hash was threaded through.
+    """
+    from importlib import import_module
+
+    from traceace.features.assemble import BLOCKS, block_source_hash
+    from traceace.features.common import block_cache_path
+
+    for name, (stem, version, _key, module) in BLOCKS.items():
+        mod = import_module(f"traceace.features.{module}")
+        builder_hash = mod._source()
+        loader_hash = block_source_hash(name)
+        assert builder_hash == loader_hash, f"{name}: builder/loader hash disagree"
+        assert block_cache_path(stem, version, None, source_hash=builder_hash) == (
+            block_cache_path(stem, version, None, source_hash=loader_hash)
+        )

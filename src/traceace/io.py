@@ -49,14 +49,7 @@ def subsample_session_ids(n_sessions: int, config: Config | None = None) -> list
     if n_sessions < 1:
         raise ValueError("n_sessions must be positive")
     feats = load_train_features(config)
-    return (
-        feats["session_id"]
-        .dropna()
-        .astype(str)
-        .drop_duplicates()
-        .head(n_sessions)
-        .tolist()
-    )
+    return feats["session_id"].dropna().astype(str).drop_duplicates().head(n_sessions).tolist()
 
 
 def load_train_labels(config: Config | None = None) -> pd.DataFrame:

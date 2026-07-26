@@ -45,6 +45,10 @@ from .lo_alignment import TOPK, _window_texts, _windows, fit_lo_vectorizer
 log = get_logger("features.feedback")
 
 VERSION = "v1"
+
+# Cache key includes a hash of the code that computes this block, so editing the
+# computation invalidates the cache automatically (see common.source_digest).
+_SRC: str | None = None
 SESSION_PREFIX = "fbs_"
 WINDOW_PREFIX = "fb_"
 
@@ -66,6 +70,19 @@ def _topk_window_frame(
     return frame_from_spans(df, topk_spans(lo_text, vec, window_matrix, spans, topk))
 
 
+def _source() -> str:
+    """Digest of the code that produces this block (memoized)."""
+    global _SRC
+    if _SRC is None:
+        import sys
+
+        from ..packaging import inference_lib
+        from .common import source_digest
+
+        _SRC = source_digest(sys.modules[__name__], inference_lib)
+    return _SRC
+
+
 @task(
     "features.feedback",
     requires="cpu",
@@ -79,7 +96,7 @@ def build(
 ) -> dict[str, Any]:
     """Response-level feedback features (session-scope + LO-window scope)."""
     stage_local()
-    path = block_cache_path("feedback", VERSION, subsample)
+    path = block_cache_path("feedback", VERSION, subsample, source_hash=_source())
     vec = fit_lo_vectorizer()
 
     def compute() -> pd.DataFrame:

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -104,8 +105,43 @@ def robust_stats(x: np.ndarray, prefix: str, trim: float = 0.1) -> dict[str, flo
     }
 
 
-def block_cache_path(block: str, version: str, subsample: int | None) -> Path:
+def source_digest(*modules: Any) -> str:
+    """Short hash of the given modules' source code.
+
+    Feature caches were keyed on a hand-written ``VERSION = "v1"`` that nobody remembered to
+    bump. Editing a feature computation therefore left the stale parquet in place and
+    ``load_or_compute`` served it silently — a model trained on features that no longer match
+    the code that claims to produce them. Hashing the source makes invalidation automatic.
+
+    Deliberately hashes the whole module: a docstring edit needlessly rebuilds a block
+    (~2 min), which is a much cheaper mistake than serving stale features.
+    """
+    import hashlib
+    import inspect
+
+    h = hashlib.sha256()
+    for mod in modules:
+        try:
+            h.update(inspect.getsource(mod).encode("utf-8"))
+        except (OSError, TypeError):  # built-in / interactive — cannot hash
+            h.update(repr(mod).encode("utf-8"))
+    return h.hexdigest()[:10]
+
+
+def block_cache_path(
+    block: str,
+    version: str,
+    subsample: int | None,
+    source_hash: str | None = None,
+) -> Path:
+    """Cache path for a feature block.
+
+    ``source_hash`` should be a :func:`source_digest` of the modules that compute the block,
+    so editing the computation invalidates the cache automatically instead of silently
+    reusing features the current code would no longer produce.
+    """
     from ..paths import features_dir
 
     suffix = "" if subsample is None else f"_sub{subsample}"
-    return features_dir() / f"{block}{suffix}__{version}.parquet"
+    tag = version if source_hash is None else f"{version}_{source_hash}"
+    return features_dir() / f"{block}{suffix}__{tag}.parquet"

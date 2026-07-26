@@ -96,10 +96,7 @@ def blend(
     first = raw[experiments[0]].reset_index(drop=True)
     frames = {
         experiments[0]: first,
-        **{
-            e: align_compatible_oof(first, raw[e], experiments[0], e)
-            for e in experiments[1:]
-        },
+        **{e: align_compatible_oof(first, raw[e], experiments[0], e) for e in experiments[1:]},
     }
     preds = np.column_stack([frames[e]["pred"].to_numpy() for e in experiments])
     y = first[LABEL_COL].to_numpy(dtype=float)

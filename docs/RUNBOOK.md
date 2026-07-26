@@ -125,6 +125,30 @@ or use the equivalent `make`/docker command from their README.
 **Step 3 — full submission.** Only after the smoke run succeeds. This **does** consume one of
 the three weekly slots.
 
+### Reading a smoke score — the coin-flip line
+
+**Predicting a constant 0.5 on any binary labels scores ln(2) = 0.693.** That is the ceiling
+for a model with no information, and it is the single most useful number for triaging a smoke
+result:
+
+| smoke score | diagnosis |
+|---|---|
+| **> 0.693** | **confidently WRONG.** Not weak — broken. Suspect scrambled features, misaligned rows, or a wrong model. Investigate before spending a slot. |
+| ~0.693 | no signal; predictions are effectively constant |
+| **< 0.693** | real predictive signal |
+
+The smoke environment uses ~100 responses **drawn from the training set** (BRIEF §2), despite
+the upload dialog calling it "fake data" — so our model has seen those rows and should score
+*well* below the line. Observed history:
+
+- `id-2719` **0.8543** and `id-2721` **0.8330** — both above the line. Both were the
+  feature-order bug shipping a scrambled matrix. We dismissed them as "fake data, meaningless"
+  and lost a submission slot as a result.
+- `id-2728` **0.4686** — below the line, and consistent with the local training-data probe
+  (0.44065). That is what a working artifact looks like.
+
+`submission.verify` now reports this comparison explicitly as the `beats_coin_flip` check.
+
 **What to check on the leaderboard.** Our CV says 0.54339 (safe variant). If the LB score is
 far worse than that, suspect train/serve skew first — that is exactly what a real submission
 is for, and why submitting early is worth a slot even with a modest model.

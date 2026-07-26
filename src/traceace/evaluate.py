@@ -163,8 +163,7 @@ def align_compatible_oof(
     cand_sessions = aligned["session_id"].astype(str).to_numpy()
     if not np.array_equal(ref_y, cand_y) or not np.array_equal(ref_sessions, cand_sessions):
         raise RuntimeError(
-            f"OOF truth/session provenance differs for {reference_name!r} and "
-            f"{candidate_name!r}"
+            f"OOF truth/session provenance differs for {reference_name!r} and {candidate_name!r}"
         )
     return aligned
 

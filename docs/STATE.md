@@ -119,6 +119,12 @@ on a single-seed difference below ~1e-3.
 - ✅ CC-BY-SA external data allowed; minor non-determinism allowed; best submission
   auto-selected; external-corpus generalizability work explicitly encouraged.
 
+## Smoke-score triage — the coin-flip line
+Constant-0.5 predictions score **ln(2) = 0.6931** on any binary labels. Above that line a model
+is *confidently wrong* (scrambled features, misaligned rows), not merely weak. Smoke history:
+`id-2719` 0.8543 ❌ · `id-2721` 0.8330 ❌ · **`id-2728` 0.4686 ✅** (matches the local
+training-data probe, 0.44065). Enforced by `verify.beats_coin_flip`.
+
 ## Known problems / open risks
 1. **The margin is thin but now solid** (−0.01132 ± 0.00066, CI excludes zero on 5/5 seeds).
    Most of the model's power is still the topic prior.

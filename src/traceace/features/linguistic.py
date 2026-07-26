@@ -36,6 +36,10 @@ from .common import block_cache_path, iter_session_frames, robust_stats, safe_di
 log = get_logger("features.linguistic")
 
 VERSION = "v1"
+
+# Cache key includes a hash of the code that computes this block, so editing the
+# computation invalidates the cache automatically (see common.source_digest).
+_SRC: str | None = None
 PREFIX = "ling_"
 
 # --- lexicons (auditable by a non-ML reader; keep them small and legible) -----
@@ -229,6 +233,19 @@ def session_linguistic_features(sid: str, df: pd.DataFrame) -> dict[str, Any]:
     return feats
 
 
+def _source() -> str:
+    """Digest of the code that produces this block (memoized)."""
+    global _SRC
+    if _SRC is None:
+        import sys
+
+        from ..packaging import inference_lib
+        from .common import source_digest
+
+        _SRC = source_digest(sys.modules[__name__], inference_lib)
+    return _SRC
+
+
 @task(
     "features.linguistic",
     requires="cpu",
@@ -237,7 +254,7 @@ def session_linguistic_features(sid: str, df: pd.DataFrame) -> dict[str, Any]:
 )
 def build(force: bool = False, subsample: int | None = None) -> dict[str, Any]:
     stage_local()
-    path = block_cache_path("linguistic", VERSION, subsample)
+    path = block_cache_path("linguistic", VERSION, subsample, source_hash=_source())
 
     def compute() -> pd.DataFrame:
         rows = []

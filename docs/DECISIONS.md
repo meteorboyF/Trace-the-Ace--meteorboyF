@@ -420,3 +420,45 @@ in this repo was measured under leakage. Findings and the paper draft are update
 after they had already caused damage; these two were never caught at all. An outside reviewer
 with an explicit brief about the failure *class* found in one pass what months of internal
 checking had missed. Budget for external review before a deadline, not after a failure.
+
+
+---
+
+## ADR-015 — 2026-07-27 — Close the remaining latent defects: duplication, stale caches, coin-flip triage
+
+**Context.** ADR-014's review was cut off before reaching two leads flagged in the brief. Both
+were the same shape as bugs that had already caused damage, so they were closed directly.
+
+**Decisions.**
+
+1. **`lo_alignment` duplication removed.** The module carried its own `alignment_features` and
+   `_window_dialogue_features` in parallel with `packaging.inference_lib`. Tested on identical
+   input they agreed exactly — but *nothing enforced it*, and a one-line edit to either would
+   have produced a silent train/serve divergence in the block that localizes every other
+   block's window. The training side now delegates to the shipped implementation. Duplication
+   removed rather than tested around, because a parity test only catches drift *after* someone
+   writes it.
+
+2. **Cache keys carry a source hash.** Every block keyed its parquet on a hand-written
+   `VERSION = "v1"` that nobody bumped, so editing a feature computation left the stale cache
+   in place and `load_or_compute` served it silently. `common.source_digest` hashes the
+   computing module (plus `inference_lib`), and `assemble.block_source_hash` resolves the same
+   value for the loader, so a builder and a loader can never disagree about which file "the
+   structural block" means. Deliberately hashes whole modules: a docstring edit forces a
+   needless ~2 min rebuild, which is far cheaper than serving stale features.
+
+3. **The coin-flip line is now a verify check.** Predicting a constant 0.5 on any binary labels
+   scores ln(2) = 0.6931. A model scoring *worse* is confidently wrong, not weak — a
+   qualitatively different diagnosis. Two container smoke runs scored 0.8543 and 0.8330 while
+   the scrambled feature matrix was shipping, and both were dismissed as "fake data,
+   meaningless". One line of arithmetic would have caught the feature-order bug before it
+   consumed a submission. `verify.beats_coin_flip` now reports the comparison every time, and
+   `RUNBOOK.md` documents the triage table.
+
+**Verification that these are behaviour-preserving.** Rebuilding every cache under the new
+hashed keys and retraining reproduced the CV score **exactly** (0.54228 both before and after),
+which is the evidence that the delegation refactor changed no feature value.
+
+**A side effect worth recording.** `selftest.all` went from ~22 s to **75 s**. It is not
+slower; it is finally doing work. The old runtime was a symptom of the cohort-mismatch bug
+(ADR-014) serving 98% NaN features. **A suspiciously fast test is a signal, not a feature.**

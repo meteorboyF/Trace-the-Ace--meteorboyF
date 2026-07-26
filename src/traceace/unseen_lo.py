@@ -133,13 +133,9 @@ def stress_test(
         model_cols = [*feat_cols, LO_ENC_COL]
         x_train = tr[feat_cols].copy()
         x_valid = va_unseen[feat_cols].copy()
-        x_train[LO_ENC_COL] = _inner_oof_lo_encoding(
-            tr, smoothing=lo_smoothing, seed=seed + r
-        )
+        x_train[LO_ENC_COL] = _inner_oof_lo_encoding(tr, smoothing=lo_smoothing, seed=seed + r)
         lo_map, global_rate = _smoothed_map(tr, smoothing=lo_smoothing)
-        x_valid[LO_ENC_COL] = (
-            va_unseen[LO_COL].map(lo_map).fillna(global_rate).to_numpy()
-        )
+        x_valid[LO_ENC_COL] = va_unseen[LO_COL].map(lo_map).fillna(global_rate).to_numpy()
         booster = lgb.train(
             p,
             lgb.Dataset(x_train[model_cols], label=tr[LABEL_COL].to_numpy()),

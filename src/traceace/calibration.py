@@ -194,9 +194,7 @@ def fit(
     res.update(
         {
             f"final_{k}": v
-            for k, v in score_frame(
-                out, cal_exp, subsample=subsample, cv_seed=cv_seed
-            ).items()
+            for k, v in score_frame(out, cal_exp, subsample=subsample, cv_seed=cv_seed).items()
             if k in ("logloss", "auc", "delta_vs_lo_only")
         }
     )

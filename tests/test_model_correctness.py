@@ -119,9 +119,7 @@ df[["response_id", "probability"]].to_csv(here / "submission.csv", index=False)
     verify_prediction_sanity(result, zip_path=candidate_zip)
 
     assert any(
-        check.name == "prediction_sanity"
-        and not check.passed
-        and "exited 7" in check.detail
+        check.name == "prediction_sanity" and not check.passed and "exited 7" in check.detail
         for check in result.checks
     )
 

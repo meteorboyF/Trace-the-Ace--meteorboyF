@@ -37,6 +37,10 @@ from .common import block_cache_path, iter_session_frames
 log = get_logger("features.embeddings")
 
 VERSION = "v1"
+
+# Cache key includes a hash of the code that computes this block, so editing the
+# computation invalidates the cache automatically (see common.source_digest).
+_SRC: str | None = None
 PREFIX = "emb_"
 
 
@@ -59,6 +63,19 @@ def _session_text(df: pd.DataFrame, max_chars: int) -> str:
     parts = [f"{r}: {c}" for r, c in zip(df["role"].tolist(), df["content"].tolist())]
     text = "\n".join(parts)
     return text[:max_chars]
+
+
+def _source() -> str:
+    """Digest of the code that produces this block (memoized)."""
+    global _SRC
+    if _SRC is None:
+        import sys
+
+        from ..packaging import inference_lib
+        from .common import source_digest
+
+        _SRC = source_digest(sys.modules[__name__], inference_lib)
+    return _SRC
 
 
 @task(
@@ -86,7 +103,7 @@ def build(
     max_chars = max_tokens * 4  # measured ~3.45 chars/token; 4 is a safe over-estimate
 
     tag = f"{model_name.split('/')[-1]}_{cache_version}"
-    path = block_cache_path("embeddings", tag, subsample)
+    path = block_cache_path("embeddings", tag, subsample, source_hash=_source())
 
     # LOUD, UNCONDITIONAL cache check — this is the expensive task.
     if is_cached(path) and not force:

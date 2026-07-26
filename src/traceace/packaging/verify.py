@@ -450,6 +450,23 @@ def verify_prediction_sanity(
     y = got["y"].to_numpy()
     p = got["probability"].to_numpy()
     ll, au = _logloss(y, p), _auc(y, p)
+
+    # The coin-flip line. Predicting a constant 0.5 on ANY binary labels scores ln(2)=0.693.
+    # A model scoring WORSE than that is confidently wrong, not merely weak — which is a
+    # qualitatively different diagnosis and the one we missed for two container smoke runs
+    # (0.8543 and 0.8330) while a scrambled feature matrix was shipping. Report it always.
+    COIN_FLIP = 0.6931
+    result.add(
+        "beats_coin_flip",
+        ll < COIN_FLIP,
+        f"logloss={ll:.5f} vs coin-flip {COIN_FLIP:.4f} — "
+        + (
+            "worse than a constant 0.5 prediction means CONFIDENTLY WRONG, "
+            "not weak; suspect scrambled/misaligned features"
+            if ll >= COIN_FLIP
+            else "below the coin-flip line, so the model carries real signal"
+        ),
+    )
     # the model saw these rows in training, so it should fit them well
     ok = ll <= max_logloss and au >= 0.75
     result.add(

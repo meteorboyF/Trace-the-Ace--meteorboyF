@@ -44,8 +44,27 @@ log = get_logger("features.trajectory")
 
 VERSION = "v1"
 
+# Cache key includes a hash of the code that computes this block, so editing the
+# computation invalidates the cache automatically (see common.source_digest).
+_SRC: str | None = None
+
 
 # Window selection comes from inference_lib so training and submission agree exactly.
+
+
+def _source() -> str:
+    """Digest of the code that produces this block (memoized)."""
+    global _SRC
+    if _SRC is None:
+        import sys
+
+        from ..packaging import inference_lib
+        from .common import source_digest
+
+        _SRC = source_digest(sys.modules[__name__], inference_lib)
+    return _SRC
+
+
 @task(
     "features.trajectory",
     requires="cpu",
@@ -58,7 +77,7 @@ def build(
     topk: int = TOPK,
 ) -> dict[str, Any]:
     stage_local()
-    path = block_cache_path("trajectory", VERSION, subsample)
+    path = block_cache_path("trajectory", VERSION, subsample, source_hash=_source())
     vec = fit_lo_vectorizer()
 
     def compute() -> pd.DataFrame:

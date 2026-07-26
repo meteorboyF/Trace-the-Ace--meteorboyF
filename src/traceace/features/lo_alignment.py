@@ -50,12 +50,15 @@ from ..paths import interim_dir, transcripts_dir
 from ..progress import pbar
 from ..staging import stage_local
 from ..tasks import task
-from .common import block_cache_path, normalize_frame, safe_div
-from .linguistic import _BRACKET_RE, _WORD_RE, HEDGE
+from .common import block_cache_path, normalize_frame
 
 log = get_logger("features.lo_alignment")
 
 VERSION = "v1"
+
+# Cache key includes a hash of the code that computes this block, so editing the
+# computation invalidates the cache automatically (see common.source_digest).
+_SRC: str | None = None
 PREFIX = "lo_"
 
 WINDOW = 20  # utterances per window (~1.5 min of dialogue at measured pacing)
@@ -147,51 +150,26 @@ def _window_texts(df: pd.DataFrame, spans: list[tuple[int, int]]) -> list[str]:
     return [" ".join(content[s:e]) for s, e in spans]
 
 
+# ---------------------------------------------------------------------------
+# Feature computation is DELEGATED to inference_lib — deliberately not duplicated.
+# ---------------------------------------------------------------------------
+# This module previously carried its own copies of `_window_dialogue_features` and
+# `alignment_features`, parallel to the ones in `packaging.inference_lib`. They happened to
+# agree, but nothing enforced it: a one-line edit to either would have produced a silent
+# train/serve divergence in the block that localizes every other block's window. That is
+# exactly how the feature-ORDER bug reached the leaderboard (ADR-013), so the duplication is
+# removed rather than tested around.
+#
+# `inference_lib` is the single implementation because it is the copy that ships.
+
+
 def _window_dialogue_features(
     df: pd.DataFrame, spans: list[tuple[int, int]], idxs: np.ndarray
 ) -> dict[str, float]:
-    """Dialogue statistics computed **inside the LO-relevant windows**.
+    """Delegate to the shipped implementation."""
+    from ..packaging.inference_lib import _window_dialogue_features as _impl
 
-    These are the features that actually differ between two learning objectives in the
-    same session — the whole point of this block.
-    """
-    if len(idxs) == 0:
-        return {
-            f"{PREFIX}kw_student_talk_ratio": 0.0,
-            f"{PREFIX}kw_student_q_rate": 0.0,
-            f"{PREFIX}kw_tutor_q_rate": 0.0,
-            f"{PREFIX}kw_hedge_rate": 0.0,
-            f"{PREFIX}kw_mean_student_words": 0.0,
-            f"{PREFIX}kw_n_utterances": 0.0,
-        }
-    rows = []
-    for i in idxs:
-        s, e = spans[int(i)]
-        rows.append(df.iloc[s:e])
-    sub = pd.concat(rows) if len(rows) > 1 else rows[0]
-
-    stu = sub[sub["role"] == "student"]
-    tut = sub[sub["role"] == "tutor"]
-    stu_chars = float(stu["content"].str.len().sum())
-    tut_chars = float(tut["content"].str.len().sum())
-    stu_text = " ".join(stu["content"].tolist()).lower()
-    stu_words = _WORD_RE.findall(_BRACKET_RE.sub(" ", stu_text))
-
-    return {
-        f"{PREFIX}kw_student_talk_ratio": safe_div(stu_chars, stu_chars + tut_chars),
-        f"{PREFIX}kw_student_q_rate": safe_div(
-            int(stu["content"].str.contains(r"\?", regex=True, na=False).sum()), len(stu)
-        ),
-        f"{PREFIX}kw_tutor_q_rate": safe_div(
-            int(tut["content"].str.contains(r"\?", regex=True, na=False).sum()), len(tut)
-        ),
-        f"{PREFIX}kw_hedge_rate": safe_div(
-            sum(stu_text.count(h) for h in HEDGE), max(len(stu_words), 1)
-        )
-        * 100.0,
-        f"{PREFIX}kw_mean_student_words": safe_div(len(stu_words), len(stu)),
-        f"{PREFIX}kw_n_utterances": float(len(sub)),
-    }
+    return _impl(df, spans, idxs)
 
 
 def alignment_features(
@@ -204,51 +182,19 @@ def alignment_features(
 ) -> dict[str, float]:
     """Features for one (session, learning objective) pair.
 
-    ``window_matrix`` and ``spans`` are precomputed per session and reused across the
-    session's learning objectives — the session's windows are vectorized only once.
+    Thin wrapper over ``inference_lib.lo_alignment_features`` so training and the submission
+    run the *same* code. ``window_matrix`` and ``spans`` are precomputed per session and
+    reused across that session's objectives.
     """
-    from sklearn.metrics.pairwise import cosine_similarity
+    from ..packaging.inference_lib import lo_alignment_features as _impl
 
     if spans is None:
         spans = _windows(df)
-    if len(spans) == 0:
+    if not spans:
         return {}
     if window_matrix is None:
         window_matrix = vec.transform(_window_texts(df, spans))
-
-    lo_vec = vec.transform([lo_text or ""])
-    sims = cosine_similarity(lo_vec, window_matrix).ravel()
-    n_win = len(sims)
-
-    order = np.argsort(-sims)
-    top = order[: min(topk, n_win)]
-    best = int(order[0])
-
-    # Normalized position of each window's centre in the session (0=start, 1=end).
-    centres = np.array([(s + e) / 2.0 for s, e in spans], dtype=float)
-    n_utt = max(len(df), 1)
-    pos = centres / n_utt
-
-    feats: dict[str, float] = {
-        # relevance strength — how well does this session cover this LO at all?
-        f"{PREFIX}sim_max": float(sims[best]),
-        f"{PREFIX}sim_topk_mean": float(sims[top].mean()),
-        f"{PREFIX}sim_mean": float(sims.mean()),
-        f"{PREFIX}sim_std": float(sims.std()),
-        f"{PREFIX}sim_sum": float(sims.sum()),
-        f"{PREFIX}sim_frac_above_half_max": float(
-            np.mean(sims >= 0.5 * sims[best]) if sims[best] > 0 else 0.0
-        ),
-        # KEY MOMENTS: where in the session does this LO live?
-        f"{PREFIX}best_pos": float(pos[best]),
-        f"{PREFIX}topk_pos_mean": float(pos[top].mean()),
-        f"{PREFIX}topk_pos_spread": float(pos[top].max() - pos[top].min()) if len(top) > 1 else 0.0,
-        f"{PREFIX}n_windows": float(n_win),
-        # coverage: is the LO discussed throughout, or in one burst?
-        f"{PREFIX}sim_gini": _gini(sims),
-    }
-    feats.update(_window_dialogue_features(df, spans, top))
-    return feats
+    return _impl(df, lo_text, vec, window_matrix, spans, topk=topk)
 
 
 def _gini(x: np.ndarray) -> float:
@@ -261,6 +207,19 @@ def _gini(x: np.ndarray) -> float:
     n = xs.size
     idx = np.arange(1, n + 1)
     return float((2 * (idx * xs).sum()) / (n * xs.sum()) - (n + 1) / n)
+
+
+def _source() -> str:
+    """Digest of the code that produces this block (memoized)."""
+    global _SRC
+    if _SRC is None:
+        import sys
+
+        from ..packaging import inference_lib
+        from .common import source_digest
+
+        _SRC = source_digest(sys.modules[__name__], inference_lib)
+    return _SRC
 
 
 @task(
@@ -290,7 +249,9 @@ def build(
     if backend != "lexical":
         raise ValueError(f"unknown backend {backend!r}; use 'lexical' or 'embedding'")
     stage_local()
-    path = block_cache_path("lo_alignment", f"{VERSION}_{backend}", subsample)
+    path = block_cache_path(
+        "lo_alignment", f"{VERSION}_{backend}", subsample, source_hash=_source()
+    )
     vec = fit_lo_vectorizer()
 
     def compute() -> pd.DataFrame:
@@ -359,7 +320,7 @@ def _build_embedding(
     cfg = get_config()
     model_name = str(cfg.get("embeddings", "alignment_model", default=DEFAULT_MODEL))
     tag = f"{model_name.split('/')[-1]}_{WE_VERSION}"
-    win_path = block_cache_path("window_embeddings", tag, subsample)
+    win_path = block_cache_path("window_embeddings", tag, subsample, source_hash=_source())
     lo_path = lo_embedding_path(tag if subsample is None else f"{tag}_sub{subsample}")
 
     if not win_path.is_file() or not lo_path.is_file():
@@ -369,7 +330,9 @@ def _build_embedding(
             "(smoke with subsample=500)."
         )
 
-    path = block_cache_path("lo_alignment", f"{VERSION}_embedding", subsample)
+    path = block_cache_path(
+        "lo_alignment", f"{VERSION}_embedding", subsample, source_hash=_source()
+    )
 
     def compute() -> pd.DataFrame:
         stage_local()

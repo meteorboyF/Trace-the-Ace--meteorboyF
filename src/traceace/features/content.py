@@ -45,6 +45,10 @@ from .lo_alignment import TOPK, _windows
 log = get_logger("features.content")
 
 VERSION = "v1"
+
+# Cache key includes a hash of the code that computes this block, so editing the
+# computation invalidates the cache automatically (see common.source_digest).
+_SRC: str | None = None
 PREFIX = "cont_"
 DEFAULT_COMPONENTS = 48
 
@@ -64,6 +68,19 @@ def _pool(vectors: np.ndarray, sims: np.ndarray, top: np.ndarray) -> np.ndarray:
         w = np.ones_like(w)
     w = w / w.sum()
     return (vectors[top] * w[:, None]).sum(axis=0)
+
+
+def _source() -> str:
+    """Digest of the code that produces this block (memoized)."""
+    global _SRC
+    if _SRC is None:
+        import sys
+
+        from ..packaging import inference_lib
+        from .common import source_digest
+
+        _SRC = source_digest(sys.modules[__name__], inference_lib)
+    return _SRC
 
 
 @task(
@@ -92,7 +109,7 @@ def build(
     cfg = get_config()
     model_name = str(cfg.get("embeddings", "alignment_model", default=DEFAULT_MODEL))
     tag = f"{model_name.split('/')[-1]}_{WE_VERSION}"
-    win_path = block_cache_path("window_embeddings", tag, subsample)
+    win_path = block_cache_path("window_embeddings", tag, subsample, source_hash=_source())
     lo_path = lo_embedding_path(tag if subsample is None else f"{tag}_sub{subsample}")
 
     if not win_path.is_file() or not lo_path.is_file():
@@ -101,7 +118,9 @@ def build(
             "tasks.run('features.window_embeddings') on an L4 first (smoke subsample=500)."
         )
 
-    path = block_cache_path("content", f"{VERSION}_k{n_components}", subsample)
+    path = block_cache_path(
+        "content", f"{VERSION}_k{n_components}", subsample, source_hash=_source()
+    )
 
     def compute() -> pd.DataFrame:
         stage_local()
