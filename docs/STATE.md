@@ -11,10 +11,18 @@
 
 ## Status: SUBMISSION READY (safe variant). Awaiting operator to submit.
 
-✅ **First container smoke test PASSED 2026-07-27** (exit 0, ~5 s, valid output). It surfaced a
-scikit-learn version mismatch (ours 1.9.0 vs container 1.8.0) that warned of "invalid results"
-while still exiting 0 — now fixed by pinning + shipping the calibrator as plain numbers
-(ADR-012). **The normal submission has NOT been made yet.**
+✅ **Container smoke tests: 2 run, both passed.**
+- `id-2719` — exit 0, ~5 s. Surfaced a scikit-learn version mismatch (ours 1.9.0 vs container
+  1.8.0) warning of "invalid results" *while still exiting 0*. Fixed by pinning + shipping the
+  calibrator as plain numbers (ADR-012).
+- `id-2721` (sha `7d097ff`) — exit 0, ~5 s, **no warnings of any kind**. Fix confirmed in the
+  real container. Six clean status lines, `data/` mounted as expected.
+
+Smoke scores (0.8543, 0.8330) are on **fake data** and carry no signal — our model predicts
+~0.70 against roughly balanced random labels, which lands right about there.
+
+⏳ **The NORMAL submission has not been made yet.** That is the next action, and it is the
+only remaining unknown: where 0.5436 sits on the real leaderboard.
 
 ✅ **Cross-row rules question: SETTLED 2026-07-27.** Already answered on the forum — cross-row
 features are prohibited, our default was correct, nothing to post. +0.00251 permanently
