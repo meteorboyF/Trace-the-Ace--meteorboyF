@@ -13,7 +13,9 @@ authors = [{ name = "meteorboyF" }]
 dependencies = [
     "numpy",
     "pandas",
-    "scikit-learn",
+    # Pinned to the competition container (verified 1.8.0 from a smoke-test log).
+    # Version skew triggers InconsistentVersionWarning when unpickling fitted estimators.
+    "scikit-learn==1.8.0",
     "lightgbm",
     "pyyaml",
     "tqdm",

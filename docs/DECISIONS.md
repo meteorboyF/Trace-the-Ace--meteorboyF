@@ -283,3 +283,43 @@ unknown-wrong one. Reporting both regimes separately is more honest.
 **Consequences.** Two numbers are now reported, not one: the seen-objective score (0.54088 ±
 0.00055) and the unseen-objective score (0.59178 ± 0.01143). The true leaderboard score sits
 between them, at a mixing ratio only the organizers know.
+
+
+---
+
+## ADR-012 — 2026-07-27 — Ship no fitted sklearn estimator; pin to the container's version
+
+**Context.** The first container smoke test exited 0 and produced valid output, but its log
+carried three warnings:
+
+> `InconsistentVersionWarning: Trying to unpickle estimator LogisticRegression from version
+> 1.9.0 when using version 1.8.0. This might lead to breaking code or invalid results.`
+
+Our local scikit-learn was 1.9.0; the runtime image ships 1.8.0. It affected the Platt
+calibrator and the TF-IDF vectorizer. Nothing crashed — "invalid results" would have been
+silent, which is the failure mode that has already cost this project twice (the OOF clobbering
+bug and the 40%-missing-features bug).
+
+**Decision.** Two independent mitigations, because one was not enough:
+
+1. **Pin `scikit-learn==1.8.0`** in `pyproject.toml` and `requirements-colab.txt` to match the
+   container exactly, and retrain. `submission.verify::verify_sklearn_version` compares the
+   manifest's build version against a declared `RUNTIME_SKLEARN` and fails on drift.
+2. **Stop shipping fitted estimators where plain data will do.** The calibrator is now exported
+   as numbers — Platt as `(coef, intercept)` applied via an explicit sigmoid, isotonic as
+   threshold arrays applied via `np.interp` — and evaluated by arithmetic in
+   `inference_lib.apply_calibration`. No sklearn object crosses the pickle boundary for
+   calibration at all, so no future image change can affect it.
+
+The TF-IDF vectorizer is still pickled; reconstructing its transform by hand carried more
+reimplementation risk than the version pin removes. The pin plus the verify check covers it,
+and a guard now fails the build if a pickled calibrator ever reappears.
+
+**Alternatives rejected.** (a) Ignoring the warning — it explicitly says *invalid results*, and
+we have no way to detect silent numerical drift in a leaderboard score. (b) Pinning alone —
+leaves us exposed if the organizers update the image mid-competition.
+
+**Consequences.** Retraining under 1.8.0 moved the score 0.54306 → 0.54360, inside the
+±0.00055 noise band, and the winning calibrator flipped Platt → none — itself consistent with
+the earlier finding that the Platt gain (+0.000058) was noise. Verify now runs 20 checks.
+**Standing rule: read smoke-test warnings, not just exit codes.**

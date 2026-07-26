@@ -67,6 +67,12 @@ MAX_ZIP_GB = 55.0
 MAX_PROJECTED_HOURS = 4.5
 MAX_LOG_LINES = 400
 
+# scikit-learn version shipped by the competition container, read from a smoke-test log
+# on 2026-07-27. Building against a different version makes joblib emit
+# InconsistentVersionWarning when unpickling fitted estimators — "may lead to breaking code
+# or invalid results". Update this when the organizers change the image.
+RUNTIME_SKLEARN = "1.8.0"
+
 
 @dataclass
 class Check:
@@ -303,6 +309,44 @@ def verify_feature_coverage(
     )
 
 
+def verify_sklearn_version(workdir: Path, result: VerifyResult) -> None:
+    """Assert the bundle was built with the container's scikit-learn version.
+
+    Our first container smoke test warned that a LogisticRegression and a TfidfVectorizer
+    pickled under 1.9.0 were being unpickled under 1.8.0, "which might lead to breaking code
+    or invalid results". The run still exited 0 — silent-degradation territory. The
+    calibrator no longer crosses the pickle boundary at all (plain numbers), but the TF-IDF
+    vectorizer still does, so the versions must match.
+    """
+    import joblib
+
+    bundle_path = workdir / "assets" / "model.joblib"
+    manifest_path = workdir / "assets" / "MANIFEST.json"
+    if not manifest_path.is_file():
+        return
+    built_with = json.loads(manifest_path.read_text()).get("sklearn_build_version")
+    if built_with is None:
+        result.add("sklearn_version_matches_runtime", False, "manifest missing build version")
+        return
+    result.add(
+        "sklearn_version_matches_runtime",
+        str(built_with) == RUNTIME_SKLEARN,
+        f"built with {built_with}, container has {RUNTIME_SKLEARN}",
+    )
+
+    # and confirm no fitted estimator is pickled where a plain-number form would do
+    if bundle_path.is_file():
+        cal = joblib.load(bundle_path).get("calibrator")
+        pickled_cal = isinstance(cal, dict) and "model" in cal
+        result.add(
+            "calibrator_is_version_proof",
+            not pickled_cal,
+            "calibrator ships a pickled sklearn estimator"
+            if pickled_cal
+            else "calibrator is plain numbers (version-proof)",
+        )
+
+
 def verify_no_cross_row_features(workdir: Path, result: VerifyResult) -> None:
     """Assert the shipped model uses no feature derived from OTHER test rows.
 
@@ -390,6 +434,7 @@ def verify(
     if smoke_dir.is_dir():
         verify_feature_coverage(smoke_dir, result)
         verify_no_cross_row_features(smoke_dir, result)
+        verify_sklearn_version(smoke_dir, result)
 
     main_src = sources.get("main.py", "")
     result.add(

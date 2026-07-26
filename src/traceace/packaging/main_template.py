@@ -177,7 +177,8 @@ def main() -> int:
     log("model predicted")
 
     if calibrator is not None:
-        preds = apply_calibrator(calibrator, preds)
+        # plain-number calibrator: pure arithmetic, no sklearn object to unpickle
+        preds = ilib.apply_calibration(calibrator, preds, eps=EPS)
 
     # Rows whose transcript was unreadable fall back to the LO prior, then the global prior.
     bad = ~np.isfinite(preds)
@@ -197,18 +198,6 @@ def main() -> int:
 
     log("wrote submission.csv")
     return 0
-
-
-def apply_calibrator(cal, p):
-    method = cal["method"]
-    model = cal["model"]
-    p = np.clip(np.asarray(p, dtype=float), EPS, 1.0 - EPS)
-    if method == "platt":
-        z = np.log(p / (1.0 - p)).reshape(-1, 1)
-        return model.predict_proba(z)[:, 1]
-    if method == "isotonic":
-        return model.predict(p)
-    return p
 
 
 if __name__ == "__main__":

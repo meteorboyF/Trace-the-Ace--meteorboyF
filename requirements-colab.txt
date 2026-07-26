@@ -20,7 +20,11 @@
 # --- core numerical / modeling (submission-critical: keep loadable in the runtime) ---
 numpy>=2.0
 pandas>=2.2
-scikit-learn>=1.5
+# PINNED to the competition container's version. A mismatch makes joblib emit
+# InconsistentVersionWarning on unpickle — "may lead to invalid results" — which is
+# exactly the silent-degradation class we cannot afford. Verified from a smoke-test log
+# 2026-07-27: the runtime image ships 1.8.0.
+scikit-learn==1.8.0
 lightgbm>=4.5          # model artifact must load in runtime; runtime ships lightgbm
 scipy>=1.13
 joblib>=1.3

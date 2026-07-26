@@ -11,6 +11,11 @@
 
 ## Status: SUBMISSION READY (safe variant). Awaiting operator to submit.
 
+✅ **First container smoke test PASSED 2026-07-27** (exit 0, ~5 s, valid output). It surfaced a
+scikit-learn version mismatch (ours 1.9.0 vs container 1.8.0) that warned of "invalid results"
+while still exiting 0 — now fixed by pinning + shipping the calibrator as plain numbers
+(ADR-012). **The normal submission has NOT been made yet.**
+
 ✅ **Cross-row rules question: SETTLED 2026-07-27.** Already answered on the forum — cross-row
 features are prohibited, our default was correct, nothing to post. +0.00251 permanently
 forfeit. See [`FORUM_QUESTION.md`](FORUM_QUESTION.md).
@@ -36,7 +41,7 @@ Everything so far has run on **CPU for zero units**.
 | `baseline.prior` | 0.60876 | 0.500 | +0.0569 |
 | `baseline.lo_only` (the bar) | 0.55220 ± 0.00022 | 0.707 | — |
 | `model.gbdt` (all features, **rules-risky**) | 0.54088 ± 0.00055 | 0.72576 ± 0.00085 | −0.01132 ± 0.00066 |
-| **`model.gbdt` SAFE (shipped)** | **0.54339 ± 0.00058** | — | **−0.00881 ± 0.00070 ✅** |
+| **`model.gbdt` SAFE (shipped, sklearn 1.8.0)** | **0.54360** | — | **−0.00824 ✅** |
 | same model, **unseen objectives only** | 0.59178 ± 0.01143 | — | −0.00804 ± 0.00260 |
 
 The test set contains objectives absent from training, so the true LB score sits **between**

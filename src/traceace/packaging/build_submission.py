@@ -104,10 +104,13 @@ def build(
     # --- model bundle -------------------------------------------------------
     boosters = _collect_boosters(experiment)
     feature_cols = _feature_cols(experiment)
+    # Ship the PLAIN-NUMBER calibrator, never the fitted sklearn estimator: the runtime's
+    # scikit-learn version differs from ours and unpickling across versions warns of
+    # "invalid results" (observed in a container smoke test, 2026-07-27).
     calibrator = None
-    cal_path = experiment_dir(experiment, None) / "calibrator.joblib"
-    if cal_path.is_file():
-        calibrator = joblib.load(cal_path)
+    plain_path = experiment_dir(experiment, None) / "calibrator_plain.joblib"
+    if plain_path.is_file():
+        calibrator = joblib.load(plain_path)
 
     train_df = load_train()
     bundle = {
@@ -128,6 +131,7 @@ def build(
         "n_boosters": len(boosters),
         "n_features": len(feature_cols),
         "calibrator": (calibrator or {}).get("method", "none"),
+        "sklearn_build_version": __import__("sklearn").__version__,
         "seed": cfg.seed,
         "clip_eps": cfg.predict_clip_eps,
     }

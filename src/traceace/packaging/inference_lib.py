@@ -955,3 +955,34 @@ def frame_from_spans(df: pd.DataFrame, spans: list[tuple[int, int]]) -> pd.DataF
         return df.iloc[0:0]
     parts = [df.iloc[s:e] for s, e in spans]
     return pd.concat(parts) if len(parts) > 1 else parts[0]
+
+
+# ---------------------------------------------------------------------------
+# Calibration — serialized as PLAIN NUMBERS, never as a pickled estimator.
+# ---------------------------------------------------------------------------
+# A smoke test in the competition container revealed the local scikit-learn (1.9.0) did
+# not match the runtime's (1.8.0), so unpickling fitted estimators raised
+# InconsistentVersionWarning: "may lead to breaking code or invalid results". Warnings that
+# say *invalid results* are the silent-degradation class this project keeps getting bitten
+# by, so the calibrator is now reduced to the handful of numbers that define it and applied
+# with arithmetic here. No sklearn object crosses the pickle boundary, and no future version
+# drift in the image can affect it.
+#
+#   platt    -> sigmoid(coef * logit(p) + intercept)
+#   isotonic -> piecewise-linear interpolation over the fitted thresholds
+
+
+def apply_calibration(cal: dict[str, Any], p: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Apply a plain-number calibrator produced by ``export_calibrator``."""
+    p = np.clip(np.asarray(p, dtype=float), eps, 1.0 - eps)
+    method = cal.get("method", "none")
+    if method == "platt":
+        z = np.log(p / (1.0 - p))
+        return 1.0 / (1.0 + np.exp(-(float(cal["coef"]) * z + float(cal["intercept"]))))
+    if method == "isotonic":
+        x = np.asarray(cal["x_thresholds"], dtype=float)
+        y = np.asarray(cal["y_thresholds"], dtype=float)
+        if x.size == 0:
+            return p
+        return np.interp(p, x, y)
+    return p

@@ -62,6 +62,27 @@ def apply_isotonic(model, p: np.ndarray) -> np.ndarray:
     return model.predict(p)
 
 
+def export_calibrator(method: str, model: Any) -> dict[str, Any]:
+    """Reduce a fitted calibrator to plain numbers for version-proof serialization.
+
+    See ``inference_lib.apply_calibration`` for the matching arithmetic. Keeping sklearn
+    objects out of the shipped bundle removes a whole class of cross-version risk.
+    """
+    if method == "platt":
+        return {
+            "method": "platt",
+            "coef": float(np.ravel(model.coef_)[0]),
+            "intercept": float(np.ravel(model.intercept_)[0]),
+        }
+    if method == "isotonic":
+        return {
+            "method": "isotonic",
+            "x_thresholds": np.asarray(model.X_thresholds_, dtype=float).tolist(),
+            "y_thresholds": np.asarray(model.y_thresholds_, dtype=float).tolist(),
+        }
+    return {"method": "none"}
+
+
 def _logit(p: np.ndarray) -> np.ndarray:
     p = clip_probs(p)
     return np.log(p / (1.0 - p))
@@ -131,9 +152,14 @@ def fit(
     if best != "none":
         best_fitter, _ = methods[best]
         assert best_fitter is not None  # "none" is the only entry with a null fitter
-        final = best_fitter(p, y)
         mdir = experiment_dir(experiment, subsample)
         mdir.mkdir(parents=True, exist_ok=True)
+        final = best_fitter(p, y)
+        # ALSO export the calibrator as plain numbers. The submission ships these, not the
+        # fitted object: the runtime's scikit-learn differs from ours, and unpickling across
+        # versions warns of "invalid results". Arithmetic is version-proof.
+        plain = export_calibrator(best, final)
+        joblib.dump(plain, mdir / "calibrator_plain.joblib")
         joblib.dump({"method": best, "model": final}, mdir / "calibrator.joblib")
 
     cal_exp = f"{experiment}.calibrated"
