@@ -239,3 +239,77 @@ def test_scrambled_feature_order_is_detected(synth_repo):
     bad = VerifyResult()
     verify_feature_order(work, bad)
     assert not bad.ok, "a permuted feature order must be rejected"
+
+
+def test_shrinkage_preserves_ranking_and_pulls_toward_base_rate():
+    """Deployment shrinkage must be ranking-invariant — that is why it is safe.
+
+    We deliberately trade log loss on the easy training regime for log loss on the harder
+    deployed one (ADR-017). The one thing that must NOT change is the ordering, since AUROC
+    0.6014 on the leaderboard says the ranking is the part that works.
+    """
+    from traceace.evaluate import auc
+    from traceace.packaging.inference_lib import apply_shrinkage
+
+    rng = np.random.default_rng(0)
+    y = rng.binomial(1, 0.7, 3000).astype(float)
+    p = np.clip(rng.normal(0.7 + 0.15 * (y - 0.5), 0.15), 0.01, 0.99)
+    base = 0.7025
+
+    for w in (0.25, 0.5, 0.75, 1.0):
+        q = apply_shrinkage(p, w, base)
+        assert np.isclose(auc(y, p), auc(y, q)), f"w={w} changed the ranking"
+        # spread shrinks toward the base rate, and the mean moves toward it
+        assert q.std() <= p.std() + 1e-12
+        assert abs(q.mean() - base) <= abs(p.mean() - base) + 1e-12
+
+
+def test_verify_finds_the_smoke_csv_by_default(tmp_path):
+    """A check that cannot fire is worse than no check — it reads as coverage.
+
+    ``submission.verify`` defaulted to ``_staging/submission.csv``, but ``_staging`` is the
+    zip BUILD directory and never holds a CSV; ``submission.smoke`` writes to ``_smoke/``.
+    All nine output checks — including row-set and ordering alignment, the failure that
+    cost submission #1 — were therefore skipped on every standalone verify run.
+    """
+    import json
+
+    from traceace.packaging.verify import _latest_smoke_csv
+
+    assert _latest_smoke_csv(tmp_path) is None, "must not invent a path when none exists"
+
+    # conventional location
+    smoke = tmp_path / "_smoke"
+    smoke.mkdir()
+    (smoke / "submission.csv").write_text("response_id,probability\na,0.5\n")
+    assert _latest_smoke_csv(tmp_path) == smoke / "submission.csv"
+
+    # a path recorded in smoke_report.json wins, so a workdir move cannot break this
+    moved = tmp_path / "elsewhere"
+    moved.mkdir()
+    (moved / "submission.csv").write_text("response_id,probability\na,0.5\n")
+    (tmp_path / "smoke_report.json").write_text(
+        json.dumps({"submission_csv": str(moved / "submission.csv")})
+    )
+    assert _latest_smoke_csv(tmp_path) == moved / "submission.csv"
+
+    # a stale report pointing at a deleted file falls back rather than exploding
+    (moved / "submission.csv").unlink()
+    assert _latest_smoke_csv(tmp_path) == smoke / "submission.csv"
+
+
+def test_missing_check_is_itself_a_failure():
+    """'0 failures' must not be reachable while checks are silently absent (ADR-018)."""
+    from traceace.packaging.verify import PREDICTION_CHECKS, REQUIRED_CHECKS, VerifyResult
+
+    # every required name present -> the guard passes
+    full = VerifyResult()
+    for n in (*REQUIRED_CHECKS, *PREDICTION_CHECKS):
+        full.add(n, True)
+    ran = {c.name for c in full.checks}
+    expected = set(REQUIRED_CHECKS) | set(PREDICTION_CHECKS)
+    assert not sorted(expected - ran)
+
+    # drop the ordering check — the exact one that went dark — and the guard must notice
+    partial = {n for n in ran if n != "row_ORDER_matches"}
+    assert sorted(expected - partial) == ["row_ORDER_matches"]

@@ -96,6 +96,21 @@ def _feature_cols(experiment: str, boosters: list[Any]) -> list[str]:
     return names
 
 
+def _shrinkage(experiment: str) -> dict[str, float] | None:
+    """Load the fitted deployment-shrinkage weight, if `calibrate.shrinkage` has run."""
+    import joblib
+
+    path = experiment_dir(experiment, None) / "shrinkage.joblib"
+    if not path.is_file():
+        log.warning(
+            "no shrinkage weight found for %s — shipping UNSHRUNK predictions. Run "
+            "tasks.run('calibrate.shrinkage') first; the deployed regime is harder than CV.",
+            experiment,
+        )
+        return None
+    return dict(joblib.load(path))
+
+
 def _lo_prior(smoothing: float = 20.0) -> dict[str, float]:
     """Per-learning-objective smoothed correctness, for the unreadable-transcript path."""
     df = load_train()
@@ -157,6 +172,7 @@ def build(
         "calibrator": calibrator,
         "lo_vectorizer": fit_lo_vectorizer(),
         "lo_prior": _lo_prior(),
+        "shrinkage": _shrinkage(experiment),
         "lo_prior_by_booster": fold_lo_priors,
         "fallback_prob": float(train_df[LABEL_COL].mean()),
         "seed": cfg.seed,

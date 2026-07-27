@@ -63,6 +63,38 @@ NETWORK_MODULES = {
 EMITTERS = {"print", "pprint"}
 LOGGER_METHODS = {"info", "warning", "error", "debug", "exception", "critical"}
 
+# Checks that MUST execute on every run. Verified by name at the end of ``verify`` — see
+# ADR-018, where nine output checks silently stopped running and the report still looked
+# green. Add a check here when it guards something we cannot afford to ship broken.
+REQUIRED_CHECKS = (
+    "zip_exists",
+    "zip_size_under_55gb",
+    "main_py_at_zip_root",
+    "no_test_data_in_logs",
+    "no_network_imports",
+    "no_cross_row_features",
+    "sklearn_version_matches_runtime",
+    "calibrator_is_version_proof",
+    "feature_order_matches_booster",
+    "progress_bars_disabled",
+    "submission_csv_exists",
+    "columns_exact",
+    "row_count_matches",
+    "no_missing_response_id",
+    "row_set_matches",
+    "row_ORDER_matches",
+    "no_nan_probabilities",
+    "probabilities_in_unit_interval",
+    "probabilities_clipped_off_0_and_1",
+)
+# Additionally required when ``check_predictions`` is on (the default).
+PREDICTION_CHECKS = (
+    "beats_coin_flip",
+    "prediction_sanity",
+    "prediction_mean_near_base_rate",
+    "feature_coverage",
+)
+
 MAX_ZIP_GB = 55.0
 MAX_PROJECTED_HOURS = 4.5
 MAX_LOG_LINES = 400
@@ -224,15 +256,31 @@ def verify_zip(zip_path: Path, result: VerifyResult) -> dict[str, str]:
     return sources
 
 
-def verify_predictions(sub_csv: Path, result: VerifyResult, smoke: bool = False) -> None:
-    """Row set, ordering, and value-range checks against the official format."""
+def verify_predictions(
+    sub_csv: Path,
+    result: VerifyResult,
+    smoke: bool = False,
+    format_csv: Path | None = None,
+) -> None:
+    """Row set, ordering, and value-range checks against the official format.
+
+    ``format_csv`` overrides the official format with the one a specific run was actually
+    given. That matters for smoke output: the smoke harness feeds ``main.py`` a 100-row
+    subsample, so checking it against the full 10,508-row format reports three guaranteed
+    failures (count, set, ordering) that mean nothing. Waiving the checks would be worse —
+    ordering is the bug that cost submission #1 — so instead we check ordering *exactly*,
+    against the format that run was handed. Same rigour, correct denominator.
+    """
     if not sub_csv.is_file():
         result.add("submission_csv_exists", False, f"{sub_csv} not found")
         return
     result.add("submission_csv_exists", True, str(sub_csv))
 
     got = pd.read_csv(sub_csv, dtype={"response_id": str})
-    want = load_submission_format(smoke=smoke)
+    if format_csv is not None and format_csv.is_file():
+        want = pd.read_csv(format_csv, dtype={"response_id": str})
+    else:
+        want = load_submission_format(smoke=smoke)
 
     result.add(
         "columns_exact",
@@ -380,22 +428,47 @@ def verify_feature_order(workdir: Path, result: VerifyResult) -> None:
     )
 
 
+def _latest_smoke_csv(sdir: Path) -> Path | None:
+    """Locate the submission.csv produced by the last ``submission.smoke`` run.
+
+    Prefers the path recorded in ``smoke_report.json`` (authoritative, and survives a
+    change to the smoke workdir layout), falling back to the conventional location.
+    """
+    report = sdir / "smoke_report.json"
+    if report.is_file():
+        try:
+            recorded = json.loads(report.read_text()).get("submission_csv")
+            if recorded and Path(recorded).is_file():
+                return Path(recorded)
+        except (OSError, ValueError):
+            pass
+    candidate = sdir / "_smoke" / "submission.csv"
+    return candidate if candidate.is_file() else None
+
+
 def verify_prediction_sanity(
     result: VerifyResult,
     zip_path: Path | None = None,
     n_sessions: int = 300,
-    max_logloss: float = 0.50,
+    max_logloss: float = 0.60,
 ) -> Path | None:
     """Run the PACKAGED main.py on TRAINING data and check the predictions are sane.
 
     Every other check inspects structure. This one asks the only question that actually
-    matters: **does the shipped artifact predict correctly?** The model was trained on these
-    rows, so log loss must be clearly better than the 0.609 global prior and AUC well above
-    chance. A scrambled, degraded or misaligned pipeline fails here even when every
-    structural check passes — which is exactly what happened.
+    matters: **does the shipped artifact predict correctly?** A scrambled, degraded or
+    misaligned pipeline fails here even when every structural check passes — which is
+    exactly what happened when a feature-order permutation shipped at AUC 0.4933.
+
+    **AUC is the primary gate.** It is the statistic that actually separates a working
+    artifact from a broken one (0.8285 versus 0.4738 when the columns were permuted), and
+    it is invariant to the deployment shrinkage we deliberately apply (ADR-017). The
+    log-loss bound is kept loose on purpose: shrinkage trades log loss on this easy
+    training regime for log loss on the harder deployed one, so a tight bound here would
+    penalise a correct decision. ``beats_coin_flip`` reports the unambiguous 0.693 line
+    separately.
 
     Deliberately uses training data: it is the only data whose labels we hold, and a model
-    that cannot fit data it was trained on is broken regardless of the test distribution.
+    that cannot rank data it was trained on is broken regardless of the test distribution.
     """
     import shutil
     import subprocess
@@ -451,6 +524,19 @@ def verify_prediction_sanity(
     p = got["probability"].to_numpy()
     ll, au = _logloss(y, p), _auc(y, p)
 
+    # AUC is the PRIMARY gate here, not log loss.
+    #
+    # This check exists to catch a broken artifact — scrambled features, misaligned rows,
+    # a wrong model. AUC separates those decisively: 0.4738 when the feature matrix was
+    # permuted versus 0.8285 working. Log loss on training data is a weaker signal AND it
+    # is now confounded by a deliberate choice: we intentionally shrink predictions toward
+    # the base rate to correct deployment overconfidence (ADR-017), which necessarily costs
+    # log loss on the *easy* training regime while helping on the hard deployed one.
+    #
+    # So the log-loss bound is kept loose enough not to fight intentional calibration, and
+    # tight enough to catch genuine breakage. The coin-flip line (0.693) remains reported
+    # separately as the unambiguous "confidently wrong" signal.
+
     # The coin-flip line. Predicting a constant 0.5 on ANY binary labels scores ln(2)=0.693.
     # A model scoring WORSE than that is confidently wrong, not merely weak — which is a
     # qualitatively different diagnosis and the one we missed for two container smoke runs
@@ -472,8 +558,9 @@ def verify_prediction_sanity(
     result.add(
         "prediction_sanity",
         ok,
-        f"on TRAINING data: logloss={ll:.5f} (need <={max_logloss}), auc={au:.4f} "
-        f"(need >=0.75), mean_pred={p.mean():.4f}",
+        f"on TRAINING data: auc={au:.4f} (PRIMARY gate, need >=0.75) · "
+        f"logloss={ll:.5f} (loose bound <={max_logloss}, deliberately not tight because "
+        f"deployment shrinkage costs log loss here) · mean_pred={p.mean():.4f}",
     )
     # a mean far from the training base rate is itself a red flag
     base = float(labels[LABEL_COL].mean())
@@ -594,14 +681,26 @@ def verify(
         result.add("log_lines_under_400", n_log_lines <= MAX_LOG_LINES, f"{n_log_lines} lines")
 
     # --- output checks ------------------------------------------------------
-    csv_path = Path(submission_csv) if submission_csv else sdir / "_staging" / "submission.csv"
-    if csv_path.is_file():
-        verify_predictions(csv_path, result, smoke=smoke)
+    # Resolve the CSV the same way regardless of how verify was invoked. The default used
+    # to be ``_staging/submission.csv`` — but ``_staging`` is the *zip build* directory and
+    # never holds a CSV, while ``submission.smoke`` writes to ``_smoke/``. So a standalone
+    # ``submission.verify`` silently skipped all NINE output checks (row set, ordering,
+    # probability range, NaN) and only surfaced one cosmetic failure whose remedy text told
+    # you to run the task that had, in fact, already produced the file. Row-ordering is
+    # precisely the failure that cost submission #1; a check that cannot fire is worse than
+    # no check, because it reads as coverage.
+    csv_path = Path(submission_csv) if submission_csv else _latest_smoke_csv(sdir)
+    if csv_path is not None and csv_path.is_file():
+        # Check against the format that run was actually handed, when we can find it.
+        run_fmt = csv_path.parent / "data" / "submission_format.csv"
+        verify_predictions(
+            csv_path, result, smoke=smoke, format_csv=run_fmt if run_fmt.is_file() else None
+        )
     else:
         result.add(
             "submission_csv_exists",
             False,
-            f"{csv_path} not found (run submission.smoke to produce one)",
+            f"no smoke output found under {sdir / '_smoke'} — run submission.smoke first",
         )
 
     # The end-to-end sanity check: does THIS shipped artifact actually predict?
@@ -609,6 +708,22 @@ def verify(
         runtime_dir = verify_prediction_sanity(result, zip_path=zip_path)
         if runtime_dir is not None:
             verify_feature_coverage(runtime_dir, result)
+
+    # Did every check we rely on actually RUN? "0 failures" is not the same as "all checks
+    # ran" — for weeks the nine output checks silently never executed because the CSV path
+    # resolved to a directory that never contains one (ADR-018), and the verifier still
+    # reported a tidy green list. This is the guard against that whole failure mode: a
+    # check that goes missing is now itself a failure, by name.
+    ran = {c.name for c in result.checks}
+    expected = set(REQUIRED_CHECKS)
+    if check_predictions:
+        expected |= set(PREDICTION_CHECKS)
+    missing = sorted(expected - ran)
+    result.add(
+        "all_expected_checks_ran",
+        not missing,
+        f"{len(ran)} checks ran" if not missing else f"NEVER RAN: {', '.join(missing)}",
+    )
 
     payload = result.to_dict()
     out = sdir / "verify_report.json"

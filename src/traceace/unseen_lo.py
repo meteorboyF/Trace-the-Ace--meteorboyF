@@ -191,3 +191,127 @@ def stress_test(
         f"({'REAL' if gain.significant else 'not distinguishable from 0'})"
     )
     return out
+
+
+@task(
+    "calibrate.shrinkage",
+    requires="cpu",
+    max_tier="cpu",
+    description="fit deployment shrinkage on the unseen-objective regime (test-like conditions)",
+)
+def fit_deployment_shrinkage(
+    force: bool = False,
+    subsample: int | None = None,
+    holdout_frac: float = 0.25,
+    n_repeats: int = 4,
+    blocks: list[str] | None = None,
+    num_boost_round: int = 800,
+    seed: int | None = None,
+    lo_smoothing: float = 20.0,
+    experiment: str = "model.gbdt",
+) -> dict[str, Any]:
+    """Fit the shrinkage weight that corrects deployment overconfidence.
+
+    **Why this is necessary.** Our CV regime is easier than the test regime: 99.7% of CV
+    validation rows have a learning objective the model has seen, and every session comes
+    from one provider. The organizers confirmed the test set contains unseen objectives and
+    is not drawn entirely from one source. A model tuned on the easier regime is
+    systematically overconfident when deployed — the leaderboard showed exactly that
+    signature (AUROC 0.6014, i.e. real ranking signal, with log loss 0.6106, marginally
+    *worse* than the global base rate).
+
+    Shrinkage cannot change ranking (AUC is invariant under it); it only pulls the
+    magnitudes toward the base rate. The weight is fitted **here, on training data** held
+    out by objective — never against leaderboard feedback, which would be rules-adjacent.
+    """
+    import joblib
+    import lightgbm as lgb
+
+    from .calibration import fit_shrinkage
+    from .config import get_config
+    from .evaluate import auc, experiment_dir
+    from .features.assemble import DEFAULT_BLOCKS, build_matrix
+    from .models.gbdt import (
+        DEFAULT_PARAMS,
+        LO_ENC_COL,
+        _inner_oof_lo_encoding,
+        _smoothed_map,
+    )
+
+    cfg = get_config()
+    seed = int(seed if seed is not None else cfg.seed)
+    blocks = list(blocks or DEFAULT_BLOCKS)
+
+    feats = load_train_features()
+    labels = pd.read_csv(cfg.work_dir / "data" / "raw" / cfg.canonical_files["train_labels"])
+    labels = labels.rename(columns={"is_correct": LABEL_COL})
+    labels["response_id"] = labels["response_id"].astype(str)
+    base_df = feats.merge(labels[["response_id", LABEL_COL]], on="response_id", how="inner")
+    if subsample is not None:
+        sess = base_df["session_id"].drop_duplicates().head(max(1, subsample))
+        base_df = base_df[base_df["session_id"].isin(sess)]
+
+    frame, feat_cols = build_matrix(base_df.reset_index(drop=True), blocks=blocks)
+    frame[LABEL_COL] = frame[LABEL_COL].astype(float)
+    base_rate = float(frame[LABEL_COL].mean())
+
+    ys: list[np.ndarray] = []
+    ps: list[np.ndarray] = []
+    for r in pbar(range(n_repeats), desc="calibrate.shrinkage draws", unit="draw"):
+        rng = np.random.default_rng(seed + r)
+        tr_idx, va_idx, _ = _split(frame, holdout_frac, rng)
+        tr, va = frame.loc[tr_idx], frame.loc[va_idx]
+        va_unseen = va[~va[LO_COL].isin(set(tr[LO_COL]))]
+        if len(tr) < 100 or len(va_unseen) < 30:
+            continue
+        p = dict(DEFAULT_PARAMS)
+        p.update({"seed": seed + r, "bagging_seed": seed + r, "feature_fraction_seed": seed + r})
+        cols = [*feat_cols, LO_ENC_COL]
+        x_tr, x_va = tr[feat_cols].copy(), va_unseen[feat_cols].copy()
+        x_tr[LO_ENC_COL] = _inner_oof_lo_encoding(tr, smoothing=lo_smoothing, seed=seed + r)
+        lo_map, global_rate = _smoothed_map(tr, smoothing=lo_smoothing)
+        x_va[LO_ENC_COL] = va_unseen[LO_COL].map(lo_map).fillna(global_rate).to_numpy()
+        bst = lgb.train(
+            p,
+            lgb.Dataset(x_tr[cols], label=tr[LABEL_COL].to_numpy()),
+            num_boost_round=num_boost_round,
+        )
+        ys.append(va_unseen[LABEL_COL].to_numpy())
+        ps.append(np.asarray(bst.predict(x_va[cols]), dtype=float))
+
+    if not ys:
+        raise RuntimeError("no usable hold-out draws for shrinkage fitting")
+
+    y = np.concatenate(ys)
+    p_all = np.concatenate(ps)
+    weight = fit_shrinkage(y, p_all, base_rate)
+
+    before = logloss(y, p_all)
+    after = logloss(y, np.clip(base_rate + weight * (p_all - base_rate), 1e-6, 1 - 1e-6))
+    prior = logloss(y, np.full(len(y), base_rate))
+
+    out: dict[str, Any] = {
+        "weight": float(weight),
+        "base_rate": base_rate,
+        "n_holdout_rows": int(len(y)),
+        "logloss_unshrunk": before,
+        "logloss_shrunk": after,
+        "logloss_constant_prior": prior,
+        "gain": before - after,
+        "auc_unchanged": auc(y, p_all),
+        "logloss": after,
+    }
+    dest = experiment_dir(experiment, None)
+    dest.mkdir(parents=True, exist_ok=True)
+    joblib.dump({"weight": float(weight), "base_rate": base_rate}, dest / "shrinkage.joblib")
+    out["output_path"] = str(dest / "shrinkage.joblib")
+
+    log.info(
+        "shrinkage w=%.2f: %.5f -> %.5f (gain %+.5f; constant prior %.5f)",
+        weight,
+        before,
+        after,
+        before - after,
+        prior,
+    )
+    return out

@@ -1,6 +1,6 @@
 # STATE.md — read this first
 
-**Last updated:** 2026-07-26 · **CI: green ✅** · all numbers are mean ± SD over 5 fold assignments
+**Last updated:** 2026-07-28 · **CI: green ✅** · all numbers are mean ± SD over 5 fold assignments
 **Competition deadline:** model submissions 2026-08-27 23:59 UTC · write-up 2026-09-15
 **Entry:** solo · **Units remaining: 733.00 / 733** (everything so far ran on CPU, 0 units)
 
@@ -9,48 +9,63 @@
 
 ---
 
-## Status: SUBMISSION READY (safe variant). Awaiting operator to submit.
+## Status: SUBMISSION 3 SCORED 0.6106 · rank #45 · shrinkage build ready, NOT yet submitted
 
-✅ **Container smoke tests: 2 run, both passed.**
-- `id-2719` — exit 0, ~5 s. Surfaced a scikit-learn version mismatch (ours 1.9.0 vs container
-  1.8.0) warning of "invalid results" *while still exiting 0*. Fixed by pinning + shipping the
-  calibrator as plain numbers (ADR-012).
-- `id-2721` (sha `7d097ff`) — exit 0, ~5 s, **no warnings of any kind**. Fix confirmed in the
-  real container. Six clean status lines, `data/` mounted as expected.
+**Leaderboard history**
 
-Smoke scores (0.8543, 0.8330) are on **fake data** and carry no signal — our model predicts
-~0.70 against roughly balanced random labels, which lands right about there.
+| # | id | log loss | AUROC | rank | verdict |
+|---|---|---|---|---|---|
+| 1 | 2723 | 0.8006 | 0.4933 | #229 | 🔴 **broken** — feature-order permutation (ADR-013) |
+| 2 | — | — | — | — | (slot spent on a smoke test) |
+| 3 | — | **0.6106** | **0.6014** | **#45** | 🟡 works, but **overconfident** |
 
-🔴 **SUBMISSION 1 (id-2723) SCORED 0.8006 / AUROC 0.4933 — rank #229. It was BROKEN, not
-merely weak.** A feature-ORDER bug shipped a scrambled design matrix: the bundle took its
-column list from `importance.parquet` (sorted by gain), which permuted 179 of 181 positions
-against the training order, and LightGBM reads positionally. Every structural check passed.
-Fixed in ADR-013; verify now runs the packaged `main.py` against training data and requires
-log loss ≤ 0.50 / AUC ≥ 0.75.
+**Submission 3 is the real baseline.** AUROC 0.6014 says the ranking carries genuine signal;
+0.6106 log loss says the probabilities are too extreme for how hard the test regime is. That
+gap is *not* brokenness and not noise — it is structural, and it is bigger than every feature
+gain we have measured combined.
 
-Local proof of the fix (packaged `main.py` on training data):
-`0.80867 / AUC 0.4738` → **`0.43927` / AUC 0.8291**, mean prediction 0.49 → 0.735 against a
-0.7025 base rate.
+**Diagnosis.** Our CV regime is easier than the test regime: 99.7% of validation rows have an
+objective seen in training, and every session comes from one provider. The test set contains
+unseen objectives and (per the forum) more than one provider. A model tuned to be confident on
+the easy regime is systematically overconfident on the hard one.
 
-⏳ **Submission 2 pending** with the fixed artifact. **2 slots left this week.**
+**Fix, ready to ship: deployment shrinkage** (ADR-017). `p' = base + w·(p − base)`, with
+**w = 0.55** and base = 0.70247, fitted on a 34,446-row unseen-objective holdout — never on
+leaderboard feedback. Ranking-invariant by construction (AUC identical to 6 decimals).
 
-✅ **Cross-row rules question: SETTLED 2026-07-27.** Already answered on the forum — cross-row
-features are prohibited, our default was correct, nothing to post. +0.00251 permanently
-forfeit. See [`FORUM_QUESTION.md`](FORUM_QUESTION.md).
+| on the unseen-objective holdout | log loss |
+|---|---|
+| unshrunk (w = 1.0) | 0.59727 |
+| **shrunk (w = 0.55)** | **0.59012** |
+| constant prior | 0.59849 |
 
-ℹ️ **AI-assistant licensing question: considered and closed 2026-07-27** — treated as
-development tooling, not a model contributing content to the solution. Reasoning recorded in
-[`OPEN_QUESTION_ai_assistant.md`](OPEN_QUESTION_ai_assistant.md); not posted. The data-handling
-practice tightened at the same time stands regardless: no verbatim transcript text in terminal
-output or assistant context, aggregates only (see `CLAUDE.md`).
+**+0.00715** — an order of magnitude above the best feature block (+0.00226 ± 0.00011).
+Expected LB movement ≈ −0.007, which would put us under the constant-prior bar for the
+first time.
+
+✅ **The shrinkage artifact is built and verified: 24 checks, 0 failures.** The bundle carries
+`{weight: 0.55, base_rate: 0.70247}`, `main.py` applies it after calibration, and smoke
+predictions tightened from std ≈0.16 / range 0.21–0.95 to **std 0.085 / range 0.517–0.826**.
+CV reproduced exactly (0.54228 / AUC 0.7235 / Δ −0.00956), confirming the rebuild changed
+nothing but calibration.
+
+🔍 **ADR-018 — a verify check that could never fire.** Found while re-verifying the above.
+`submission.verify` looked for its CSV in `_staging/` (the zip *build* dir, which never holds
+one) while `submission.smoke` writes to `_smoke/`. **All nine output checks — including
+`row_ORDER_matches`, the guard for the exact bug that broke submission #1 — silently never
+ran** in any standalone verify, and the report still looked green. Fixed; ordering is now
+checked exactly, against the format each run was actually handed. A new
+`all_expected_checks_ran` check asserts every guard by name, so a check going dark is now
+itself a failure. **Thirteenth silent-correctness defect; third of the species
+"verification inspects structure, never behaviour."**
 
 ⚠️ **Two things need YOU, not me:**
-1. **Submit** — see [`RUNBOOK.md`](RUNBOOK.md) "Submitting for real". I cannot submit on your
-   behalf (your account, and it consumes one of three weekly slots). Nothing now blocks this.
+1. **Submit the shrinkage build** — 1 slot left this week. See [`RUNBOOK.md`](RUNBOOK.md).
 2. **The L4 run** — this machine has no GPU. Cells are staged in the notebook.
 
-The full cheap ladder is built, runs on the real data, and produces a valid `submission.zip`.
-Everything so far has run on **CPU for zero units**.
+⚠️ **Stale numbers to redo:** `interpret.ablation_repeated` and `evaluate.unseen_lo` were both
+measured *before* the target-encoding leakage fix (ADR-014). Their FINDINGS.md figures are
+superseded and must be re-run before the write-up quotes them.
 
 ## Best score
 
@@ -73,7 +88,8 @@ ruling (ADR-009). A DQ would end the competition; 0.0025 log loss would not.
 5-fold session-grouped CV on all 35,072 responses, **repeated over 5 fold assignments**.
 The improvement's 95% CI is [−0.01191, −0.01074] and excludes zero on all 5 seeds.
 Full table: [`EXPERIMENTS.md`](EXPERIMENTS.md).
-**No leaderboard submission has been made** — LB score unknown.
+**Measured LB (submission 3): 0.6106 / AUROC 0.6014.** The CV-to-LB gap is ~0.068, far
+larger than the seen/unseen spread above — which is what motivated ADR-017.
 
 ### Block contributions (paired, 5 seeds) — the only valid basis for block decisions
 | Block | Δ (mean ± SD) | Verdict |
@@ -102,13 +118,17 @@ on a single-seed difference below ~1e-3.
 - **Semantic LO-alignment**: `features.window_embeddings` (BAAI/bge-small-en-v1.5, MIT) and
   `lo_alignment(backend="embedding")` implemented and **validated end-to-end on CPU**.
 - **Submission**: 1.63 MB zip, `main.py` at root, **all 24 verify checks pass** — including
-  feature-order, prediction-sanity on training data, and the coin-flip line. Smoke ~5 s →
-  **~0.15 h projected** for the full test set (cap 6 h).
-- **Quality gates**: ruff clean · mypy clean (46 files) · **71 tests pass** ·
+  feature-order, the nine output checks (now actually reachable, ADR-018), prediction-sanity
+  on training data, the coin-flip line, and `all_expected_checks_ran`. Smoke ~4 s →
+  **~0.13 h projected** for the full test set (cap 6 h).
+  `prediction_sanity` gates on **AUC 0.8285** (primary) with a deliberately loose log-loss
+  bound, because shrinkage trades training-regime log loss for deployment-regime calibration.
+- **Quality gates**: ruff clean · mypy clean (46 files) · **74 tests pass** ·
   `selftest.all` green in ~25 s · **GitHub Actions CI green**.
-  ⚠️ **Treat a green suite as weak evidence.** These same gates were green while **twelve**
-  correctness defects were live, four of which reached a submission and one of which scored
-  below random on the leaderboard. See ADR-013 … ADR-016.
+  ⚠️ **Treat a green suite as weak evidence.** These same gates were green while **thirteen**
+  correctness defects were live, four of which reached a submission, one of which scored
+  below random on the leaderboard, and one of which was a *verification check that never
+  executed*. See ADR-013 … ADR-018.
 - **Artifact namespacing**: subsampled runs write to `<experiment>__subN` for OOF *and*
   model dirs, so a smoke run can never corrupt a full-data result or a submission.
 
@@ -155,18 +175,24 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
 7. Git SHAs in early run manifests read `unknown` (they predate the first commit).
 
 ## Next actions, in order
-1. **L4 session — semantic alignment + content block (~3–4 units).** THE highest-value
-   experiment. Smoke `run("features.window_embeddings", subsample=500)`, then the full run,
-   then `run("features.lo_alignment", backend="embedding", force=True)`,
-   `run("features.content")`, and finally `run("interpret.ablation_repeated")` to re-rank.
-   Lexical matching is the current ceiling and it now measurably *hurts*; semantic matching
-   is the fix, and the pooled content vectors add *what was said* as orthogonal evidence.
-2. **Move taxonomy**: `annotate.moves` (vLLM backend) seeded by the feedback categories, then
-   `model.move_classifier`, then move-distribution features.
-3. **First real submission** once step 1 lands. Budget: 3/week, ~15 attempts left.
-4. **A100 timing validation (~4 units)** only immediately before a real submission.
-5. Tuning is **not** a next action — a capacity sweep showed the plateau (FINDINGS N6).
-6. **Always** re-run `interpret.ablation_repeated` after adding a block; substitutability
+1. **Submit the shrinkage build** (operator action, 1 slot left this week). It is built and
+   24/24 verified. Expected ≈ −0.007 log loss, which would cross under the constant-prior bar.
+2. **Re-run `interpret.ablation_repeated` and `evaluate.unseen_lo`** — both were measured
+   under target-encoding leakage (ADR-014) and every figure they feed into FINDINGS.md is
+   stale. Cheap, CPU-only, and the write-up depends on these being honest.
+3. **Sweep `w` more finely and by regime.** We tested a coarse grid and took 0.55. Worth
+   asking whether shrinkage should be *conditional* — e.g. stronger for rows whose objective
+   is unseen, since that is precisely where confidence is unearned. This is the highest-value
+   remaining modelling idea, and it costs zero units.
+4. **L4 session — semantic alignment + content block (~3–4 units).** Smoke
+   `run("features.window_embeddings", subsample=500)`, then the full run, then
+   `run("features.lo_alignment", backend="embedding", force=True)`, `run("features.content")`,
+   then re-run the ablation. Lexical matching measurably *hurts*; semantic matching is the fix.
+5. **Move taxonomy**: `annotate.moves` (vLLM backend), then `model.move_classifier`, then
+   move-distribution features. ~40 units — hold until step 3 and 4 have landed.
+6. **A100 timing validation (~4 units)** only immediately before a real submission.
+7. Tuning is **not** a next action — a capacity sweep showed the plateau (FINDINGS N6).
+8. **Always** re-run `interpret.ablation_repeated` after adding a block; substitutability
    means every prior ablation is stale.
 
 ## Compute budget

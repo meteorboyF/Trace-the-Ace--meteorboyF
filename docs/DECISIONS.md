@@ -520,3 +520,125 @@ contradictory submission status.
 **Reviewed and found clean:** the target-encoding rewrite, calibration inner loop, unseen-LO
 split, generated `main.py` fallback and rules boundary, repeated-seed pairing, feature-assembly
 joins, and submission feature ordering.
+
+
+---
+
+## ADR-017 — 2026-07-27 — The leaderboard says we are overconfident, not wrong
+
+**Context.** First honest submission (order-correct, leak-free): **log loss 0.6106, AUROC
+0.6014, rank #45** (up from #229). The rank is a big improvement. The *score* is a diagnosis.
+
+| | log loss |
+|---|---|
+| CV, seen objectives | 0.54228 |
+| CV, unseen objectives | 0.592 |
+| **leaderboard** | **0.6106** |
+| constant global prior (0.7025) | 0.60876 |
+
+We are **marginally worse than a constant** while AUROC 0.6014 says the ranking carries real
+signal. Those two facts together have one main reading: **the ordering is informative and the
+magnitudes are wrong.** The model is systematically overconfident for the regime it is
+deployed into.
+
+**Why that is expected, in hindsight.** Our CV regime is *easier* than the test regime in two
+ways the organizers told us about: 99.7% of CV validation rows carry a learning objective the
+model has seen, and every training session comes from one provider, whereas the test set
+contains unseen objectives and is "not drawn entirely from Third Space Learning". A model
+whose confidence is tuned on the easy regime will be overconfident on the hard one.
+
+**Decision.** Apply a shrinkage toward the base rate, `p' = base + w·(p − base)`, with `w`
+fitted on the **unseen-objective holdout** — our closest in-house proxy for deployment.
+
+Two properties make this the right instrument:
+* **Ranking-invariant.** AUC is unchanged by a monotone affine map, so we cannot damage the
+  one thing that is demonstrably working.
+* **Fitted on training data only.** `w` comes from our own held-out objectives, *not* from
+  leaderboard feedback — which would be rules-adjacent (there is an open forum thread on
+  exactly that).
+
+**Evidence.** On the unseen-objective holdout (34,446 rows, AUC 0.5827 — close to the observed
+LB AUC of 0.6014, so the proxy is calibrated to roughly the right difficulty):
+
+| shrinkage | log loss |
+|---|---|
+| w = 1.0 (unshrunk) | 0.59727 |
+| **w = 0.5 (optimum)** | **0.59014** |
+| constant prior | 0.59849 |
+
+A gain of **+0.00713** — an order of magnitude larger than any feature-engineering effect we
+have measured (the best block contributes +0.00226 ± 0.00011).
+
+**Alternatives rejected.** (a) Tuning `w` against leaderboard scores — rules-adjacent and would
+overfit ~10k rows. (b) Post-hoc Platt on the ordinary CV OOF — that fits the *easy* regime and
+would leave the overconfidence in place; it is why our existing calibration step reported
+"no calibration needed". (c) Retraining with heavier regularisation — slower, and it would
+degrade ranking, which is the part that works.
+
+**Consequences.** The submission bundle now carries `{weight, base_rate}` and `main.py` applies
+the shrinkage after calibration. Expected LB movement is roughly −0.007, which would put us
+below the constant-prior bar for the first time.
+
+**The wider lesson.** For most of this project we optimised CV log loss and treated the gap to
+deployment as noise. The gap was structural and larger than every feature gain combined.
+**When validation and deployment regimes differ, calibrating for the deployment regime can be
+worth more than any amount of feature engineering** — and it is cheap, ranking-safe, and
+measurable in-house.
+
+---
+
+## ADR-018 — A verification check that could never fire (2026-07-28)
+
+**Status:** accepted · **Context:** found while re-verifying the shrinkage build
+
+**The defect.** `submission.verify` resolved its submission CSV to
+`submission/_staging/submission.csv` by default. But `_staging` is the *zip build*
+directory — it holds `main.py`, `inference_lib.py` and `assets/`, and never a CSV.
+`submission.smoke` writes its output to `submission/_smoke/submission.csv`.
+
+So a standalone `submission.verify` took the else-branch every time, recorded a single
+`submission_csv_exists` failure, and **skipped all nine output checks**: `columns_exact`,
+`row_count_matches`, `no_missing_response_id`, `row_set_matches`, `row_ORDER_matches`,
+`no_nan_probabilities`, `probabilities_in_unit_interval`, and the clipping checks.
+
+Two things make this worse than an ordinary bug. First, the failure message read
+*"run submission.smoke to produce one"* — advice that was already satisfied, so the
+natural response was to dismiss it as a stale-artifact nag rather than investigate.
+Second, **`row_ORDER_matches` is the check for the exact failure that broke submission #1**
+(a feature-order permutation, AUROC 0.4933, rank #229). The verifier reported 15 checks and
+we read that as coverage.
+
+**Why it hid.** The full pipeline passes `submission_csv=` explicitly, so the end-to-end
+path always exercised the output checks and reported 24/24. Only the standalone invocation
+was blind — and the standalone invocation is the one a person runs before submitting.
+
+**Decision.**
+1. Resolve the CSV from `smoke_report.json`'s recorded `submission_csv`, falling back to
+   `_smoke/submission.csv`. Authoritative, and survives a change to the smoke workdir.
+2. Compare against **the format file that run was actually handed**
+   (`<run>/data/submission_format.csv`) rather than the full official format. The smoke
+   harness feeds `main.py` a 100-row subsample, so checking it against 10,508 rows produces
+   three guaranteed failures that mean nothing. Waiving the checks was the wrong fix —
+   ordering is exactly what we cannot afford to stop checking — so we check ordering
+   *exactly*, against the correct denominator.
+3. Regression test `test_verify_finds_the_smoke_csv_by_default` pins all four cases,
+   including a stale report pointing at a deleted file.
+
+**Also changed: `prediction_sanity` now gates on AUC, not log loss.** That check exists to
+catch a broken artifact, and AUC separates those decisively (0.8285 working vs 0.4738 when
+the columns were permuted) while being invariant to the deployment shrinkage of ADR-017.
+The log-loss bound moved 0.50 → 0.60 because shrinkage deliberately costs log loss on the
+easy training regime; a tight bound there would have failed the build for making a *correct*
+decision. `beats_coin_flip` still reports the unambiguous 0.693 line.
+
+**Consequences.** Verify now reports **23 checks, 0 failures**, and `row_ORDER_matches`
+genuinely executed in a standalone run for the first time. The count *dropped* from the
+previously-reported 24 because that figure came from the pipeline path; the honest
+standalone number is 23.
+
+**The lesson, which is now a pattern.** This is the thirteenth silent-correctness defect,
+and the third of the same species: **verification that inspects structure while never
+exercising behaviour.** A check that cannot fire is worse than no check, because a green
+line reads as evidence. Two habits fall out of it: assert on the *number* of checks that
+ran, not just that none failed; and prefer failure messages that state what was searched
+for and where, since a misleading remedy string is what kept this alive.

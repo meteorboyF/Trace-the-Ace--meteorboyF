@@ -203,3 +203,37 @@ def fit(
     (d / f"{experiment.replace('.', '_')}.json").write_text(json.dumps(res, indent=2, default=str))
     res["output_path"] = str(d / f"{experiment.replace('.', '_')}.json")
     return res
+
+
+# ---------------------------------------------------------------------------
+# Deployment shrinkage — calibrating for the regime we actually deploy into.
+# ---------------------------------------------------------------------------
+# Our CV regime is EASIER than the test regime: CV validation rows almost always have a
+# learning objective the model has seen (99.7% of them), and every session comes from one
+# provider. The organizers confirmed the test set has objectives absent from training and
+# is "not drawn entirely from Third Space Learning". A model tuned on the easy regime is
+# therefore systematically OVERCONFIDENT when deployed.
+#
+# The leaderboard showed exactly that signature: AUROC 0.6014 (real ranking signal) with
+# log loss 0.6106 (marginally WORSE than predicting the global base rate). Ranking works;
+# the magnitudes are wrong.
+#
+# Shrinking predictions toward the base rate, p' = base + w*(p - base), cannot change
+# ranking at all (AUC is invariant) but recovers a large amount of log loss when the model
+# is overconfident. On the unseen-objective holdout — our closest in-house proxy for test
+# conditions — the optimum is w≈0.5, worth ~0.007 log loss.
+#
+# w is fitted on TRAINING data (the unseen-objective holdout). It is NOT tuned against
+# leaderboard feedback, which would be rules-adjacent.
+
+
+def fit_shrinkage(y: np.ndarray, p: np.ndarray, base_rate: float) -> float:
+    """Find the shrinkage weight minimizing log loss on a holdout matched to deployment."""
+    grid = np.arange(0.05, 1.01, 0.05)
+    losses = [logloss(y, clip_probs(base_rate + w * (p - base_rate))) for w in grid]
+    return float(grid[int(np.argmin(losses))])
+
+
+def apply_shrinkage(p: np.ndarray, weight: float, base_rate: float) -> np.ndarray:
+    """p' = base + w*(p - base). Ranking-preserving; only the magnitudes move."""
+    return clip_probs(base_rate + float(weight) * (np.asarray(p, dtype=float) - base_rate))

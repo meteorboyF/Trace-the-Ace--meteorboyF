@@ -239,10 +239,13 @@ def _source() -> str:
     if _SRC is None:
         import sys
 
-        from ..packaging import inference_lib
         from .common import source_digest
 
-        _SRC = source_digest(sys.modules[__name__], inference_lib)
+        # This block computes its features locally, so its cache identity depends on
+        # THIS module only. Including inference_lib here would make an unrelated edit
+        # there (e.g. to a calibration helper) invalidate a 20-minute rebuild for no
+        # reason — precision matters in a cache key, not just safety.
+        _SRC = source_digest(sys.modules[__name__])
     return _SRC
 
 

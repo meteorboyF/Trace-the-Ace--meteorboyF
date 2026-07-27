@@ -979,6 +979,17 @@ def lo_prior_values(lo_ids: np.ndarray, spec: dict[str, Any]) -> np.ndarray:
 #   isotonic -> piecewise-linear interpolation over the fitted thresholds
 
 
+def apply_shrinkage(p: np.ndarray, weight: float, base_rate: float, eps: float = 1e-6):
+    """Shrink predictions toward the base rate: p' = base + w*(p - base).
+
+    Corrects overconfidence when the deployed regime is harder than the validation regime.
+    Ranking-invariant (AUC unchanged); only the magnitudes move. ``weight`` is fitted on a
+    training-data holdout matched to deployment conditions, never on leaderboard feedback.
+    """
+    out = base_rate + float(weight) * (np.asarray(p, dtype=float) - base_rate)
+    return np.clip(out, eps, 1.0 - eps)
+
+
 def apply_calibration(cal: dict[str, Any], p: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     """Apply a plain-number calibrator produced by ``export_calibrator``."""
     p = np.clip(np.asarray(p, dtype=float), eps, 1.0 - eps)

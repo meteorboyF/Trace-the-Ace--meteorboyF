@@ -76,6 +76,7 @@ def main() -> int:
     vectorizer = bundle.get("lo_vectorizer")
     fallback = float(bundle.get("fallback_prob", 0.5))
     lo_prior = dict(bundle.get("lo_prior", {}))
+    shrinkage = bundle.get("shrinkage")
     lo_prior_by_booster = list(bundle.get("lo_prior_by_booster", []))
     log("assets loaded")
 
@@ -216,6 +217,12 @@ def main() -> int:
     if calibrator is not None:
         # plain-number calibrator: pure arithmetic, no sklearn object to unpickle
         preds = ilib.apply_calibration(calibrator, preds, eps=EPS)
+
+    # Deployment shrinkage: the test regime is harder than the CV regime (unseen learning
+    # objectives, multiple data sources), so the model is systematically overconfident.
+    # Ranking-invariant; fitted on a training holdout, never on leaderboard feedback.
+    if shrinkage is not None:
+        preds = ilib.apply_shrinkage(preds, shrinkage["weight"], shrinkage["base_rate"], eps=EPS)
 
     # Rows whose transcript was missing/unreadable/empty use the LO prior exactly. Do not
     # rely on LightGBM returning NaN: it normally emits a plausible finite prediction from
