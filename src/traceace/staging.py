@@ -24,6 +24,7 @@ import tarfile
 import time
 import zipfile
 from pathlib import Path
+from typing import Any
 
 from .config import get_config
 from .logging_utils import get_logger
@@ -79,6 +80,7 @@ def stage_local(force: bool = False) -> Path:
         with heartbeat("copy raw.zip from Drive"):
             shutil.copyfile(drive_zip, local_zip)
         _extract_archive(local_zip, rdir)
+        _flatten_outer_archive(rdir, cfg.canonical_files.values())
 
     # raw.zip contains the original transcript archive as one of its five members.
     # Extracting the outer archive is therefore only half of staging. This used to run
@@ -95,6 +97,24 @@ def stage_local(force: bool = False) -> Path:
 
     log.info("stage_local: staged at %s", rdir)
     return rdir
+
+
+def _flatten_outer_archive(rdir: Path, canonical_names: Any) -> None:
+    """Move canonical members out of one Drive-created wrapper directory.
+
+    Depending on how Drive creates an archive, the same five files may be stored at the ZIP
+    root or below a folder such as ``raw/``. Downstream paths are intentionally canonical,
+    so normalize either shape immediately after extraction.
+    """
+    for name in canonical_names:
+        destination = rdir / str(name)
+        if destination.exists():
+            continue
+        matches = [path for path in rdir.rglob(str(name)) if path.is_file()]
+        if len(matches) > 1:
+            raise RuntimeError(f"raw.zip contains multiple candidates for {name}")
+        if matches:
+            shutil.move(str(matches[0]), destination)
 
 
 def _extract_archive(archive: Path, dest_dir: Path, into_named_dir: bool = False) -> None:

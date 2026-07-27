@@ -189,15 +189,16 @@ def test_colab_staging_extracts_nested_transcript_archive(tmp_path):
             "session_id,utterance_id,role,content,timestamp\ns1,0,tutor,synthetic,0:00:01\n",
         )
     with zipfile.ZipFile(drive / "data" / "raw.zip", "w") as outer:
-        outer.writestr("train_transcripts.zip", nested_buffer.getvalue())
+        # Drive may preserve the selected folder as an enclosing directory.
+        outer.writestr("raw/train_transcripts.zip", nested_buffer.getvalue())
         outer.writestr(
-            "train_features.csv",
+            "raw/train_features.csv",
             "response_id,session_id,learning_objective_id,learning_objective\n"
             "r1,s1,lo1,synthetic\n",
         )
-        outer.writestr("train_labels.csv", "response_id,is_correct\nr1,1\n")
-        outer.writestr("submission_format.csv", "response_id,probability\nx,0.5\n")
-        outer.writestr("submission_format_smoke.csv", "response_id,probability\nx,0.5\n")
+        outer.writestr("raw/train_labels.csv", "response_id,is_correct\nr1,1\n")
+        outer.writestr("raw/submission_format.csv", "response_id,probability\nx,0.5\n")
+        outer.writestr("raw/submission_format_smoke.csv", "response_id,probability\nx,0.5\n")
 
     traceace.configure(repo_dir=_repo_root(), drive_root=drive, work_dir=work, quiet=True)
     from traceace.staging import stage_local
