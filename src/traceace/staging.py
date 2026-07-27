@@ -143,6 +143,35 @@ def sync_to_drive(local_path: Path, drive_rel: str, as_tar: bool = True) -> Path
     return dest
 
 
+def restore_from_drive(
+    drive_rel: str,
+    force: bool = False,
+    destination_parent: str | None = None,
+) -> Path | None:
+    """Restore one sync tarball into the local work root on a fresh Colab runtime."""
+    cfg = get_config()
+    if cfg.drive_root is None:
+        return None
+    source = cfg.drive_root / drive_rel
+    if not source.is_file():
+        return None
+    with tarfile.open(source) as tf:
+        members = tf.getmembers()
+        roots = {Path(member.name).parts[0] for member in members if Path(member.name).parts}
+        if len(roots) != 1:
+            raise RuntimeError(f"cache archive {source} does not have exactly one root")
+        extract_root = cfg.work_dir / destination_parent if destination_parent else cfg.work_dir
+        destination = extract_root / next(iter(roots))
+        if destination.exists() and not force:
+            log.info("restore_from_drive: %s exists (skip)", destination)
+            return destination
+        extract_root.mkdir(parents=True, exist_ok=True)
+        with heartbeat("restore cache from Drive"):
+            tf.extractall(extract_root, filter="data")
+    log.info("restore_from_drive: restored %s", destination)
+    return destination
+
+
 class CheckpointSyncer:
     """Sync an output on a time interval so a disconnect costs at most one interval.
 

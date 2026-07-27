@@ -16,7 +16,7 @@ from . import budget as budget_mod
 from .config import get_config
 from .logging_utils import get_logger
 from .paths import runs_dir
-from .staging import sync_to_drive
+from .staging import restore_from_drive, sync_to_drive
 from .tasks import task
 
 log = get_logger("maintenance")
@@ -182,6 +182,11 @@ def sync_artifacts(force: bool = False, subsample: int | None = None) -> dict[st
     for local_rel, drive_rel in (
         ("artifacts", "artifacts/rollup.tar"),
         ("runs", "runs/runs.tar"),
+        # Paid embedding outputs are feature caches, not model artifacts. Omitting these
+        # meant an L4 disconnect discarded the expensive extraction despite "cache forever"
+        # messaging throughout the runbook.
+        ("data/features", "cache/features.tar"),
+        ("data/interim", "cache/interim.tar"),
     ):
         local = cfg.work_dir / local_rel
         if not local.exists():
@@ -192,6 +197,33 @@ def sync_artifacts(force: bool = False, subsample: int | None = None) -> dict[st
     if not written:
         log.info("sync_artifacts: local mode (no Drive configured) — nothing synced")
     return {"synced": written, "n_synced": len(written)}
+
+
+@task(
+    "maintenance.restore_artifacts",
+    requires="cpu",
+    max_tier="h100",
+    description="restore model/run/feature caches from Drive tarballs",
+)
+def restore_artifacts(force: bool = False, subsample: int | None = None) -> dict[str, Any]:
+    restored = [
+        str(path)
+        for drive_rel in (
+            "artifacts/rollup.tar",
+            "runs/runs.tar",
+            "cache/features.tar",
+            "cache/interim.tar",
+        )
+        if (
+            path := restore_from_drive(
+                drive_rel,
+                force=force,
+                destination_parent="data" if drive_rel.startswith("cache/") else None,
+            )
+        )
+        is not None
+    ]
+    return {"restored": restored, "n_restored": len(restored)}
 
 
 def artifacts_dir(config: Any = None) -> Path:

@@ -48,6 +48,50 @@ log = get_logger("unseen_lo")
 LO_COL = "learning_objective_id"
 
 
+def _fit_weight_with_bases(y: np.ndarray, predictions: np.ndarray, base_rates: np.ndarray) -> float:
+    """Fit one shrinkage weight when proxy draws have different train-only base rates."""
+    grid = np.arange(0.05, 1.01, 0.05)
+    losses = [
+        logloss(y, np.clip(base_rates + w * (predictions - base_rates), 1e-6, 1 - 1e-6))
+        for w in grid
+    ]
+    return float(grid[int(np.argmin(losses))])
+
+
+def _crossfit_shrinkage(
+    draws: list[tuple[np.ndarray, np.ndarray, np.ndarray, float]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluate shrinkage without fitting a row's weight or base rate on its label.
+
+    Each tuple is ``(response_ids, labels, predictions, train_base_rate)``. Proxy draws
+    overlap, so response IDs in the evaluation draw are explicitly removed from the other
+    draws used to fit its weight.
+    """
+    ys: list[np.ndarray] = []
+    preds: list[np.ndarray] = []
+    for eval_i, (eval_ids, eval_y, eval_p, eval_base) in enumerate(draws):
+        fit_y: list[np.ndarray] = []
+        fit_p: list[np.ndarray] = []
+        fit_b: list[np.ndarray] = []
+        eval_id_set = set(eval_ids.tolist())
+        for fit_i, (ids, y, p, base) in enumerate(draws):
+            if fit_i == eval_i:
+                continue
+            keep = np.asarray([value not in eval_id_set for value in ids], dtype=bool)
+            if keep.any():
+                fit_y.append(y[keep])
+                fit_p.append(p[keep])
+                fit_b.append(np.full(int(keep.sum()), base))
+        if not fit_y:
+            raise RuntimeError("shrinkage cross-fit has no non-overlapping calibration rows")
+        weight = _fit_weight_with_bases(
+            np.concatenate(fit_y), np.concatenate(fit_p), np.concatenate(fit_b)
+        )
+        ys.append(eval_y)
+        preds.append(np.clip(eval_base + weight * (eval_p - eval_base), 1e-6, 1 - 1e-6))
+    return np.concatenate(ys), np.concatenate(preds)
+
+
 def _split(
     df: pd.DataFrame, holdout_frac: float, rng: np.random.Generator
 ) -> tuple[pd.Index, pd.Index, set[str]]:
@@ -255,8 +299,7 @@ def fit_deployment_shrinkage(
     frame[LABEL_COL] = frame[LABEL_COL].astype(float)
     base_rate = float(frame[LABEL_COL].mean())
 
-    ys: list[np.ndarray] = []
-    ps: list[np.ndarray] = []
+    draws: list[tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
     for r in pbar(range(n_repeats), desc="calibrate.shrinkage draws", unit="draw"):
         rng = np.random.default_rng(seed + r)
         tr_idx, va_idx, _ = _split(frame, holdout_frac, rng)
@@ -276,18 +319,26 @@ def fit_deployment_shrinkage(
             lgb.Dataset(x_tr[cols], label=tr[LABEL_COL].to_numpy()),
             num_boost_round=num_boost_round,
         )
-        ys.append(va_unseen[LABEL_COL].to_numpy())
-        ps.append(np.asarray(bst.predict(x_va[cols]), dtype=float))
+        draws.append(
+            (
+                va_unseen["response_id"].astype(str).to_numpy(),
+                va_unseen[LABEL_COL].to_numpy(),
+                np.asarray(bst.predict(x_va[cols]), dtype=float),
+                float(global_rate),
+            )
+        )
 
-    if not ys:
+    if not draws:
         raise RuntimeError("no usable hold-out draws for shrinkage fitting")
 
-    y = np.concatenate(ys)
-    p_all = np.concatenate(ps)
+    y = np.concatenate([draw[1] for draw in draws])
+    p_all = np.concatenate([draw[2] for draw in draws])
     weight = fit_shrinkage(y, p_all, base_rate)
 
     before = logloss(y, p_all)
-    after = logloss(y, np.clip(base_rate + weight * (p_all - base_rate), 1e-6, 1 - 1e-6))
+    fitted_after = logloss(y, np.clip(base_rate + weight * (p_all - base_rate), 1e-6, 1 - 1e-6))
+    crossfit_y, crossfit_p = _crossfit_shrinkage(draws)
+    after = logloss(crossfit_y, crossfit_p)
     prior = logloss(y, np.full(len(y), base_rate))
 
     out: dict[str, Any] = {
@@ -296,8 +347,10 @@ def fit_deployment_shrinkage(
         "n_holdout_rows": int(len(y)),
         "logloss_unshrunk": before,
         "logloss_shrunk": after,
+        "logloss_shrunk_in_sample": fitted_after,
         "logloss_constant_prior": prior,
         "gain": before - after,
+        "gain_in_sample": before - fitted_after,
         "auc_unchanged": auc(y, p_all),
         "logloss": after,
     }

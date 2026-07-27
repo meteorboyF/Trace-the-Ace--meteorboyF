@@ -47,6 +47,23 @@ def test_guard_refuses_wasteful_tier_by_default(synth_repo, monkeypatch):
         tasks.run("eda.overview")
 
 
+def test_vllm_annotation_refuses_cpu_before_loading_data(synth_repo, monkeypatch):
+    from traceace import annotate, runtime
+
+    monkeypatch.setattr(
+        runtime, "detect_accelerator", lambda: runtime.Accelerator("cpu", "CPU", None)
+    )
+    with pytest.raises(RuntimeError, match="requires at least an L4 GPU"):
+        annotate.moves(backend="vllm", subsample=1)
+
+
+def test_vllm_move_label_is_valid_for_the_utterance_role():
+    from traceace.annotate import STUDENT_MOVES, _parsed_llm_label
+
+    label = _parsed_llm_label("explaining", "student", "synthetic text")
+    assert label in STUDENT_MOVES
+
+
 # --- Drive path guard --------------------------------------------------------
 def test_drive_path_detection(tmp_path):
     drive = tmp_path / "drive"
@@ -177,6 +194,29 @@ def test_heartbeat_silent_when_disabled(monkeypatch, capsys):
         pass
     captured = capsys.readouterr()
     assert "quiet" not in captured.out
+
+
+def test_artifact_sync_includes_paid_feature_caches(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from traceace import maintenance
+
+    for relative in ("artifacts", "runs", "data/features", "data/interim"):
+        (tmp_path / relative).mkdir(parents=True)
+    destinations: list[str] = []
+    monkeypatch.setattr(maintenance, "get_config", lambda: SimpleNamespace(work_dir=tmp_path))
+    monkeypatch.setattr(
+        maintenance,
+        "sync_to_drive",
+        lambda local, destination, as_tar=True: (
+            destinations.append(destination) or tmp_path / destination
+        ),
+    )
+
+    maintenance.sync_artifacts()
+
+    assert "cache/features.tar" in destinations
+    assert "cache/interim.tar" in destinations
 
 
 def _repo_root() -> Path:

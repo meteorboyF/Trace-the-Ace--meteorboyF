@@ -135,8 +135,8 @@ def heuristic_label(role: str, text: str) -> str:
 
 # --- LLM backend (dev-time only) ---------------------------------------------
 ANNOTATION_PROMPT = """You are labelling utterances from a K-12 maths tutoring session.
-Label the TUTOR utterance with exactly one move type from this list:
-{tutor_moves}
+Label the {role} utterance with exactly one move type from this list:
+{moves}
 
 Definitions:
 - questioning: asks the student to produce an answer or idea
@@ -153,6 +153,14 @@ Utterance: {text}
 Label:"""
 
 
+def _parsed_llm_label(raw_text: str, role: str, text: str) -> str:
+    """Accept only labels valid for the utterance's role; otherwise use the heuristic."""
+    raw = raw_text.strip().lower().split()
+    label = raw[0].strip(".,:;") if raw else ""
+    valid = set(TUTOR_MOVES if role == "tutor" else STUDENT_MOVES)
+    return label if label in valid else heuristic_label(role, text)
+
+
 def _llm_label_batch(texts: list[str], model_name: str, roles: list[str]) -> list[str]:
     """Label a batch with a local open-weights model via vLLM (Colab GPU only)."""
     from vllm import LLM, SamplingParams
@@ -160,16 +168,18 @@ def _llm_label_batch(texts: list[str], model_name: str, roles: list[str]) -> lis
     llm = LLM(model=model_name, dtype="auto", gpu_memory_utilization=0.85)
     params = SamplingParams(temperature=0.0, max_tokens=6)
     prompts = [
-        ANNOTATION_PROMPT.format(tutor_moves=", ".join(TUTOR_MOVES), text=t[:1200]) for t in texts
+        ANNOTATION_PROMPT.format(
+            role=role.upper(),
+            moves=", ".join(TUTOR_MOVES if role == "tutor" else STUDENT_MOVES),
+            text=text[:1200],
+        )
+        for text, role in zip(texts, roles)
     ]
     outs = llm.generate(prompts, params)
-    labels = []
-    valid = set(TUTOR_MOVES) | set(STUDENT_MOVES)
-    for o, role, text in zip(outs, roles, texts):
-        raw = o.outputs[0].text.strip().lower().split()
-        lab = raw[0].strip(".,:;") if raw else ""
-        labels.append(lab if lab in valid else heuristic_label(role, text))
-    return labels
+    return [
+        _parsed_llm_label(output.outputs[0].text, role, text)
+        for output, role, text in zip(outs, roles, texts)
+    ]
 
 
 @task(
@@ -194,6 +204,15 @@ def moves(
     """
     cfg = get_config()
     seed = int(seed if seed is not None else cfg.seed)
+    if backend == "vllm":
+        from .runtime import detect_accelerator, tier_at_least
+
+        accelerator = detect_accelerator()
+        if not tier_at_least(accelerator.tier, "l4"):
+            raise RuntimeError(
+                "annotate.moves backend='vllm' requires at least an L4 GPU; "
+                f"detected {accelerator.tier} ({accelerator.name})"
+            )
     path = annotations_path(backend, subsample)
     if path.is_file() and not force:
         log.warning("annotate.moves: CACHE HIT %s — skipping (force=True to redo)", path)

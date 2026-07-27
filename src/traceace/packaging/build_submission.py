@@ -34,6 +34,24 @@ from .main_template import render_main
 
 log = get_logger("submission.build")
 
+# These feature families currently have training/research implementations but no matching
+# offline implementation in main.py. Packaging them would otherwise create a plausible model
+# bundle that only fails later (or, before feature-coverage verification existed, silently
+# predicts with NaNs).
+UNDEPLOYABLE_FEATURE_PREFIXES: tuple[str, ...] = ("cont_", "emb_", "move_")
+
+
+def _assert_features_deployable(feature_cols: list[str]) -> None:
+    unsupported = sorted(
+        column for column in feature_cols if column.startswith(UNDEPLOYABLE_FEATURE_PREFIXES)
+    )
+    if unsupported:
+        families = sorted({column.split("_", 1)[0] for column in unsupported})
+        raise RuntimeError(
+            "model contains research-only feature families with no main.py implementation: "
+            f"{families}. Do not package this experiment until train/serve parity is implemented."
+        )
+
 
 def _collect_boosters(experiment: str) -> list[Any]:
     import lightgbm as lgb
@@ -156,6 +174,7 @@ def build(
     # --- model bundle -------------------------------------------------------
     boosters = _collect_boosters(experiment)
     feature_cols = _feature_cols(experiment, boosters)
+    _assert_features_deployable(feature_cols)
     fold_lo_priors = _collect_fold_lo_priors(experiment, boosters)
     # Ship the PLAIN-NUMBER calibrator, never the fitted sklearn estimator: the runtime's
     # scikit-learn version differs from ours and unpickling across versions warns of

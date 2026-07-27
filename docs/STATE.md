@@ -9,7 +9,7 @@
 
 ---
 
-## Status: SUBMISSION 3 SCORED 0.6106 · rank #45 · shrinkage build ready, NOT yet submitted
+## Status: SUBMISSION 2 SCORED 0.6106 · rank #45 · one slot remains this week
 
 **Leaderboard history**
 
@@ -17,7 +17,7 @@
 |---|---|---|---|---|---|
 | 1 | 2723 | 0.8006 | 0.4933 | #229 | 🔴 **broken** — feature-order permutation (ADR-013) |
 | 2 | — | — | — | — | (slot spent on a smoke test) |
-| 3 | — | **0.6106** | **0.6014** | **#45** | 🟡 works, but **overconfident** |
+| 2 | — | **0.6106** | **0.6014** | **#45** | 🟡 works, but **overconfident** |
 
 **Submission 3 is the real baseline.** AUROC 0.6014 says the ranking carries genuine signal;
 0.6106 log loss says the probabilities are too extreme for how hard the test regime is. That
@@ -36,12 +36,14 @@ leaderboard feedback. Ranking-invariant by construction (AUC identical to 6 deci
 | on the unseen-objective holdout | log loss |
 |---|---|
 | unshrunk (w = 1.0) | 0.59727 |
-| **shrunk (w = 0.55)** | **0.59012** |
+| shrunk, evaluated on the same rows used to fit w | 0.59012 |
+| **shrunk, response-disjoint cross-fit** | **0.59181** |
 | constant prior | 0.59849 |
 
-**+0.00715** — an order of magnitude above the best feature block (+0.00226 ± 0.00011).
-Expected LB movement ≈ −0.007, which would put us under the constant-prior bar for the
-first time.
+The original **+0.00715** estimate was in-sample calibration performance. Round 3 corrected
+the evaluation: response-disjoint cross-fitting gives **+0.00546**. The direction remains
+strong and materially larger than any individual feature block, but the earlier estimate was
+optimistic and must not be quoted as held-out evidence.
 
 ✅ **The shrinkage artifact is built and verified: 24 checks, 0 failures.** The bundle carries
 `{weight: 0.55, base_rate: 0.70247}`, `main.py` applies it after calibration, and smoke

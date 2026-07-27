@@ -642,3 +642,31 @@ exercising behaviour.** A check that cannot fire is worse than no check, because
 line reads as evidence. Two habits fall out of it: assert on the *number* of checks that
 ran, not just that none failed; and prefer failure messages that state what was searched
 for and where, since a misleading remedy string is what kept this alive.
+
+---
+
+## ADR-019 — 2026-07-28 — Cross-fit shrinkage; GPU blocks remain research-only
+
+**Context.** ADR-017 fitted the shrinkage weight on unseen-objective proxy predictions and
+reported log loss on those same rows. That measured in-sample calibration fit, not held-out
+generalization. The notebook also presented semantic/content GPU blocks as if they could flow
+directly into a submission, although `main.py` has no encoder inference implementation.
+
+**Decision.**
+
+1. Report shrinkage with response-disjoint cross-fitting across proxy draws. Because draws
+   overlap, every evaluation response ID is removed from the draws used to fit its weight.
+2. Package building fails immediately if a booster contains `cont_`, `emb_`, or `move_`
+   research-only features. They cannot enter a submission until offline train/serve parity
+   exists.
+3. Paid caches under `data/features/` and `data/interim/` are synchronized to Drive and
+   restorable on a fresh runtime.
+
+**Evidence.** Full-data proxy performance is 0.59727 unshrunk, 0.59012 when scored on the
+same rows used to fit the weight, and **0.59181 under response-disjoint cross-fitting**:
+an honest gain of **0.00546**. The fitted deployment artifact remains `w=0.55`.
+
+**Consequences.** Shrinkage remains the largest validated single intervention, but the
+previous +0.00715 figure is retracted as a generalization estimate. GPU experiments must
+demonstrate repeated-seed value and gain an explicit inference implementation before they
+can enter `submission.zip`.

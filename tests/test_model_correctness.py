@@ -245,3 +245,31 @@ def test_move_annotations_are_subsample_namespaced(synth_repo):
     from traceace.annotate import annotations_path
 
     assert annotations_path("heuristic") != annotations_path("heuristic", 50)
+
+
+def test_shrinkage_gain_is_crossfit_and_excludes_overlapping_rows():
+    from traceace.unseen_lo import _crossfit_shrinkage
+
+    draws = [
+        (
+            np.asarray(["shared", "a"]),
+            np.asarray([1.0, 0.0]),
+            np.asarray([0.9, 0.4]),
+            0.5,
+        ),
+        (
+            np.asarray(["shared", "b"]),
+            np.asarray([1.0, 1.0]),
+            np.asarray([0.9, 0.6]),
+            0.5,
+        ),
+        (
+            np.asarray(["c", "d"]),
+            np.asarray([0.0, 1.0]),
+            np.asarray([0.2, 0.8]),
+            0.5,
+        ),
+    ]
+    y, pred = _crossfit_shrinkage(draws)
+    assert len(y) == len(pred) == 6
+    assert np.isfinite(pred).all()

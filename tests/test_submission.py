@@ -313,3 +313,11 @@ def test_missing_check_is_itself_a_failure():
     # drop the ordering check — the exact one that went dark — and the guard must notice
     partial = {n for n in ran if n != "row_ORDER_matches"}
     assert sorted(expected - partial) == ["row_ORDER_matches"]
+
+
+def test_packaging_rejects_research_only_feature_families():
+    from traceace.packaging.build_submission import _assert_features_deployable
+
+    _assert_features_deployable(["struct_n_utterances", "lo_prior_enc"])
+    with np.testing.assert_raises_regex(RuntimeError, "no main.py implementation"):
+        _assert_features_deployable(["struct_n_utterances", "cont_00"])
