@@ -63,8 +63,9 @@ STUDENT_MOVES = [
 ]
 
 
-def annotations_path(backend: str = "heuristic") -> Path:
-    return interim_dir() / f"move_annotations_{backend}_{VERSION}.parquet"
+def annotations_path(backend: str = "heuristic", subsample: int | None = None) -> Path:
+    suffix = "" if subsample is None else f"_sub{subsample}"
+    return interim_dir() / f"move_annotations_{backend}_{VERSION}{suffix}.parquet"
 
 
 # --- heuristic backend -------------------------------------------------------
@@ -193,7 +194,7 @@ def moves(
     """
     cfg = get_config()
     seed = int(seed if seed is not None else cfg.seed)
-    path = annotations_path(backend)
+    path = annotations_path(backend, subsample)
     if path.is_file() and not force:
         log.warning("annotate.moves: CACHE HIT %s — skipping (force=True to redo)", path)
         df = pd.read_parquet(path)

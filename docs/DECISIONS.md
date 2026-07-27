@@ -462,3 +462,61 @@ which is the evidence that the delegation refactor changed no feature value.
 **A side effect worth recording.** `selftest.all` went from ~22 s to **75 s**. It is not
 slower; it is finally doing work. The old runtime was a symptom of the cohort-mismatch bug
 (ADR-014) serving 98% NaN features. **A suspiciously fast test is a signal, not a feature.**
+
+
+---
+
+## ADR-016 — 2026-07-27 — Round-2 review: four defects, all in never-executed code
+
+**Context.** A second independent review was run with `docs/REVIEW_PROMPT.md`, which pointed
+explicitly at measured blind spots: modules with zero test coverage, tasks that had never once
+been executed, and the entirely unexercised GPU path. **All four defects it found were in
+exactly those places** — evidence that "code that has never run has never been right" is a
+usable heuristic, not a slogan.
+
+**1. Embedding producer and consumers disagreed on the artifact path — and I caused it.**
+ADR-015 keyed feature caches on a hash of the *computing module's* source. That is correct when
+a block reads its own cache, and wrong the moment one module reads **another module's**
+artifact. `features.window_embeddings` wrote using its own hash (`3be44af9c8`) while
+`features.content` and the embedding backend of `features.lo_alignment` reconstructed the
+filename using theirs (`06a008ce95`, `fe0824af12`). Verified: three modules, three different
+hashes. A successful — and *paid* — L4 extraction would have produced a valid artifact that
+every downstream task reported as missing.
+*Fix:* path construction is centralized in the producer (`window_embedding_path`,
+`lo_embedding_path`); consumers import it. Verified that producer and both consumers now
+resolve identical paths at every subsample.
+**Lesson: a fix for one silent-failure class introduced another, in the one path I could not
+exercise locally.** Cross-module artifact references need a single owner for identity.
+
+**2–3. More artifact-identity collisions.** `annotate.moves` and `model.move_classifier` shared
+one path between smoke and production runs (a forced self-test could overwrite production
+annotations and models with 50-session versions); content PCA artifacts omitted subsample,
+`topk`, and source identity from their keys. Same class as ADR-014's OOF/model clobbering — my
+generalization of that fix was incomplete, covering OOF frames, model dirs and feature caches
+but not annotations, classifiers, or PCA transforms.
+
+**4. Move-classifier evaluation leaked session identity.** The classifier split utterances at
+random, so the same tutor's phrasing appeared in train and validation. Verified: under the old
+split **all 50 sessions** in the annotation cache appeared on both sides; under the corrected
+`GroupShuffleSplit`, zero.
+
+**The corrected number is better, not worse — and the reason matters.** The review reported
+0.3250 accuracy after the fix versus 0.7650 before, but flagged the cohorts were not comparable.
+Re-measured at full scale (45,642 annotations, ~22.8k sessions, session-disjoint split):
+**0.8739 accuracy, 0.7722 macro-F1**. The 0.3250 figure was an artifact of the 50-session smoke
+cohort, not evidence that the classifier is weak. The leakage fix was necessary and correct;
+the pessimistic conclusion drawn from the smoke run was not.
+
+**Caveat that limits how much this licenses.** These are *heuristic* (regex-derived) labels, so
+the classifier is largely learning to reproduce rules — which it should do well. It does **not**
+follow that it will reproduce LLM-quality labels at 0.87. The distil step looks viable; that is
+weaker than "proven".
+
+**Also from this round.** Five mutation/identity regression tests (suite 66 → 71);
+`selftest.all` warm-cache time 41 s → 25 s by having the move-classifier step actually use the
+50-session cohort; `docs/STATE.md` reconciled after the review flagged stale counts and
+contradictory submission status.
+
+**Reviewed and found clean:** the target-encoding rewrite, calibration inner loop, unseen-LO
+split, generated `main.py` fallback and rules boundary, repeated-seed pairing, feature-assembly
+joins, and submission feature ordering.

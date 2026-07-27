@@ -314,14 +314,12 @@ def _build_embedding(
     only thing that changes is *how relevance is measured*.
     """
     from ..config import get_config
-    from .window_embeddings import DEFAULT_MODEL, lo_embedding_path
-    from .window_embeddings import VERSION as WE_VERSION
+    from .window_embeddings import DEFAULT_MODEL, lo_embedding_path, window_embedding_path
 
     cfg = get_config()
     model_name = str(cfg.get("embeddings", "alignment_model", default=DEFAULT_MODEL))
-    tag = f"{model_name.split('/')[-1]}_{WE_VERSION}"
-    win_path = block_cache_path("window_embeddings", tag, subsample, source_hash=_source())
-    lo_path = lo_embedding_path(tag if subsample is None else f"{tag}_sub{subsample}")
+    win_path = window_embedding_path(model_name, subsample)
+    lo_path = lo_embedding_path(model_name, subsample)
 
     if not win_path.is_file() or not lo_path.is_file():
         raise FileNotFoundError(

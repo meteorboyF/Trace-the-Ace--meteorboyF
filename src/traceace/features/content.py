@@ -53,8 +53,17 @@ PREFIX = "cont_"
 DEFAULT_COMPONENTS = 48
 
 
-def pca_path(tag: str, n_components: int) -> Path:
-    return interim_dir() / f"content_pca_{tag}_k{n_components}.joblib"
+def pca_path(
+    tag: str,
+    n_components: int,
+    topk: int,
+    subsample: int | None,
+    source_hash: str,
+) -> Path:
+    suffix = "" if subsample is None else f"_sub{subsample}"
+    return interim_dir() / (
+        f"content_pca_{tag}_k{n_components}_top{topk}_{source_hash}{suffix}.joblib"
+    )
 
 
 def _pool(vectors: np.ndarray, sims: np.ndarray, top: np.ndarray) -> np.ndarray:
@@ -68,6 +77,16 @@ def _pool(vectors: np.ndarray, sims: np.ndarray, top: np.ndarray) -> np.ndarray:
         w = np.ones_like(w)
     w = w / w.sum()
     return (vectors[top] * w[:, None]).sum(axis=0)
+
+
+def _embedding_paths(model_name: str, subsample: int | None) -> tuple[Path, Path]:
+    """Resolve producer-owned embedding paths without duplicating its cache identity."""
+    from .window_embeddings import lo_embedding_path, window_embedding_path
+
+    return (
+        window_embedding_path(model_name, subsample),
+        lo_embedding_path(model_name, subsample),
+    )
 
 
 def _source() -> str:
@@ -103,14 +122,15 @@ def build(
     import joblib
     from sklearn.decomposition import PCA
 
-    from .window_embeddings import DEFAULT_MODEL, lo_embedding_path
-    from .window_embeddings import VERSION as WE_VERSION
+    from .window_embeddings import (
+        DEFAULT_MODEL,
+        artifact_tag,
+    )
 
     cfg = get_config()
     model_name = str(cfg.get("embeddings", "alignment_model", default=DEFAULT_MODEL))
-    tag = f"{model_name.split('/')[-1]}_{WE_VERSION}"
-    win_path = block_cache_path("window_embeddings", tag, subsample, source_hash=_source())
-    lo_path = lo_embedding_path(tag if subsample is None else f"{tag}_sub{subsample}")
+    tag = artifact_tag(model_name)
+    win_path, lo_path = _embedding_paths(model_name, subsample)
 
     if not win_path.is_file() or not lo_path.is_file():
         raise FileNotFoundError(
@@ -119,7 +139,10 @@ def build(
         )
 
     path = block_cache_path(
-        "content", f"{VERSION}_k{n_components}", subsample, source_hash=_source()
+        "content",
+        f"{VERSION}_k{n_components}_top{topk}",
+        subsample,
+        source_hash=_source(),
     )
 
     def compute() -> pd.DataFrame:
@@ -176,7 +199,7 @@ def build(
         k = int(min(n_components, X.shape[1], max(X.shape[0] - 1, 1)))
 
         # PCA basis is fit on TRAINING pooled vectors only, then persisted for inference.
-        pp = pca_path(tag, k)
+        pp = pca_path(tag, k, topk, subsample, _source())
         with heartbeat(f"PCA fit ({X.shape[0]} x {X.shape[1]} -> {k})"):
             pca = PCA(n_components=k, random_state=cfg.seed)
             Z = pca.fit_transform(X)

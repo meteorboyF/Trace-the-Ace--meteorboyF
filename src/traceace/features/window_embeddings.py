@@ -24,6 +24,7 @@ and never re-run: the cache check is unconditional and loud.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -53,8 +54,22 @@ DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 
-def lo_embedding_path(tag: str) -> Path:
-    return interim_dir() / f"lo_embeddings_{tag}.parquet"
+def artifact_tag(model_name: str) -> str:
+    """Filesystem-safe identity for the exact model, not merely its basename."""
+    name = model_name.rsplit("/", 1)[-1]
+    digest = hashlib.sha256(model_name.encode("utf-8")).hexdigest()[:8]
+    return f"{name}_{digest}_{VERSION}"
+
+
+def window_embedding_path(model_name: str, subsample: int | None) -> Path:
+    return block_cache_path(
+        "window_embeddings", artifact_tag(model_name), subsample, source_hash=_source()
+    )
+
+
+def lo_embedding_path(model_name: str, subsample: int | None) -> Path:
+    suffix = "" if subsample is None else f"_sub{subsample}"
+    return interim_dir() / f"lo_embeddings_{artifact_tag(model_name)}_{_source()}{suffix}.parquet"
 
 
 def _load_model(model_name: str, device: str | None = None):
@@ -97,9 +112,8 @@ def build(
     """
     cfg = get_config()
     model_name = model_name or str(cfg.get("embeddings", "alignment_model", default=DEFAULT_MODEL))
-    tag = f"{model_name.split('/')[-1]}_{VERSION}"
-    win_path = block_cache_path("window_embeddings", tag, subsample, source_hash=_source())
-    lo_path = lo_embedding_path(tag if subsample is None else f"{tag}_sub{subsample}")
+    win_path = window_embedding_path(model_name, subsample)
+    lo_path = lo_embedding_path(model_name, subsample)
 
     if is_cached(win_path) and lo_path.is_file() and not force:
         log.warning(

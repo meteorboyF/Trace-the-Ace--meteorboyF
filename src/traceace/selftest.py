@@ -97,7 +97,7 @@ def all_(
     step("interpret.report", experiment="model.gbdt", subsample=n_sessions)
 
     step("annotate.moves", subsample=n_sessions, n_sample=2000, force=force)
-    step("model.move_classifier", subsample=None, force=force)
+    step("model.move_classifier", subsample=n_sessions, force=force)
 
     built = step("submission.build", experiment="model.gbdt")
     smoke = step("submission.smoke")

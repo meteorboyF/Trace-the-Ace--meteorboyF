@@ -32,7 +32,7 @@ BLOCKS: dict[str, tuple[str, str, str, str]] = {
     "feedback": ("feedback", "v1", "response_id", "feedback"),
     "trajectory": ("trajectory", "v1", "response_id", "trajectory"),
     # requires features.window_embeddings (GPU, once)
-    "content": ("content", "v1_k48", "response_id", "content"),
+    "content": ("content", "v1_k48_top3", "response_id", "content"),
 }
 
 

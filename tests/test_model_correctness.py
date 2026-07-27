@@ -193,3 +193,55 @@ def test_ensemble_requires_an_explicit_compatible_experiment_list(synth_repo):
 
     with np.testing.assert_raises_regex(ValueError, "must be explicit"):
         blend(experiments=None)
+
+
+def test_embedding_consumers_resolve_the_producer_cache(synth_repo):
+    """Content/semantic alignment must read the exact path the GPU producer writes."""
+    from traceace.features.content import _embedding_paths
+    from traceace.features.window_embeddings import (
+        lo_embedding_path,
+        window_embedding_path,
+    )
+
+    model = "vendor/model"
+    assert _embedding_paths(model, 17) == (
+        window_embedding_path(model, 17),
+        lo_embedding_path(model, 17),
+    )
+    assert lo_embedding_path(model, 17) != lo_embedding_path(model, None)
+
+
+def test_content_pca_is_namespaced_by_cohort_and_pooling(synth_repo):
+    """A smoke PCA or alternate top-k must never overwrite the full-data transform."""
+    from traceace.features.content import pca_path
+
+    full = pca_path("model", 48, 3, None, "source")
+    smoke = pca_path("model", 48, 3, 400, "source")
+    other_pool = pca_path("model", 48, 5, None, "source")
+    assert len({full, smoke, other_pool}) == 3
+
+
+def test_move_classifier_holdout_is_session_disjoint():
+    from traceace.models.move_classifier import _grouped_split
+
+    ann = pd.DataFrame(
+        {
+            "session_id": np.repeat([f"s{i}" for i in range(10)], 3),
+            "move": ["m"] * 30,
+        }
+    )
+    train_idx, test_idx = _grouped_split(ann, test_size=0.2, seed=1234)
+    assert set(ann.iloc[train_idx]["session_id"]).isdisjoint(set(ann.iloc[test_idx]["session_id"]))
+
+
+def test_move_classifier_artifacts_include_annotation_source(synth_repo):
+    from traceace.models.move_classifier import model_path
+
+    assert model_path("tfidf", "heuristic") != model_path("tfidf", "vllm")
+    assert model_path("tfidf", "heuristic") != model_path("tfidf", "heuristic", 50)
+
+
+def test_move_annotations_are_subsample_namespaced(synth_repo):
+    from traceace.annotate import annotations_path
+
+    assert annotations_path("heuristic") != annotations_path("heuristic", 50)

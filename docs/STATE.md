@@ -89,7 +89,7 @@ Full table: [`EXPERIMENTS.md`](EXPERIMENTS.md).
 on a single-seed difference below ~1e-3.
 
 ## What works
-- **All 27 tasks** registered and runnable via `traceace.tasks.run(name)`.
+- **All 37 tasks** registered and runnable via `traceace.tasks.run(name)`.
 - **Data**: ingest normalizes suffixed filenames by content shape; 22,821 transcripts
   consolidated. Measured facts in [`DATA.md`](DATA.md).
 - **CV**: session-grouped folds built once and persisted; leakage test green in CI.
@@ -101,11 +101,14 @@ on a single-seed difference below ~1e-3.
   of our own earlier conclusions).
 - **Semantic LO-alignment**: `features.window_embeddings` (BAAI/bge-small-en-v1.5, MIT) and
   `lo_alignment(backend="embedding")` implemented and **validated end-to-end on CPU**.
-- **Submission**: 1.29 MB zip, `main.py` at root, **all 16 verify checks pass**, smoke run
-  4.3 s → **0.126 h projected** for the full test set (cap 6 h).
-- **Quality gates**: ruff clean · mypy clean (41 files) · **45 tests pass** · `selftest.all`
-  green in 23 s · **GitHub Actions CI green** (verified tests actually collect — they
-  previously did not).
+- **Submission**: 1.63 MB zip, `main.py` at root, **all 24 verify checks pass** — including
+  feature-order, prediction-sanity on training data, and the coin-flip line. Smoke ~5 s →
+  **~0.15 h projected** for the full test set (cap 6 h).
+- **Quality gates**: ruff clean · mypy clean (46 files) · **71 tests pass** ·
+  `selftest.all` green in ~25 s · **GitHub Actions CI green**.
+  ⚠️ **Treat a green suite as weak evidence.** These same gates were green while **twelve**
+  correctness defects were live, four of which reached a submission and one of which scored
+  below random on the leaderboard. See ADR-013 … ADR-016.
 - **Artifact namespacing**: subsampled runs write to `<experiment>__subN` for OOF *and*
   model dirs, so a smoke run can never corrupt a full-data result or a submission.
 
@@ -124,6 +127,13 @@ Constant-0.5 predictions score **ln(2) = 0.6931** on any binary labels. Above th
 is *confidently wrong* (scrambled features, misaligned rows), not merely weak. Smoke history:
 `id-2719` 0.8543 ❌ · `id-2721` 0.8330 ❌ · **`id-2728` 0.4686 ✅** (matches the local
 training-data probe, 0.44065). Enforced by `verify.beats_coin_flip`.
+
+## Move-classifier: honest baseline
+Full-scale, session-disjoint evaluation on 45,642 heuristic annotations:
+**0.8739 accuracy / 0.7722 macro-F1**. Supersedes both the leaky 0.7650 and the
+smoke-cohort 0.3250 (ADR-016). Caveat: heuristic labels are regex-derived, so the classifier
+is largely reproducing rules — this does **not** establish it can reproduce LLM-quality labels
+at that level, which is what the ~40-unit `annotate.moves` plan actually depends on.
 
 ## Known problems / open risks
 1. **The margin is thin but now solid** (−0.01132 ± 0.00066, CI excludes zero on 5/5 seeds).
