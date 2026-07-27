@@ -230,6 +230,25 @@ def test_heartbeat_silent_when_disabled(monkeypatch, capsys):
     assert "quiet" not in captured.out
 
 
+def test_logging_setup_survives_colab_module_reload(tmp_path, monkeypatch):
+    import logging
+
+    from traceace import logging_utils
+
+    root = logging.getLogger("traceace")
+    monkeypatch.setattr(logging_utils, "_CONFIGURED", False)
+    if hasattr(root, "_traceace_configured"):
+        monkeypatch.delattr(root, "_traceace_configured")
+    logging_utils.setup_logging(tmp_path)
+    count = len(root.handlers)
+
+    # This is what sync() does to the module global; the Logger object itself survives.
+    monkeypatch.setattr(logging_utils, "_CONFIGURED", False)
+    logging_utils.setup_logging(tmp_path)
+
+    assert len(root.handlers) == count
+
+
 def test_artifact_sync_includes_paid_feature_caches(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

@@ -27,8 +27,19 @@ def setup_logging(log_dir: Path | None = None, level: int = logging.INFO) -> log
     """
     global _CONFIGURED
     root = logging.getLogger("traceace")
-    if _CONFIGURED:
+    # Colab's sync() deliberately removes and re-imports every traceace module before each
+    # task. Module globals reset, but Logger objects survive in logging's process-wide
+    # registry. Relying only on _CONFIGURED therefore added another console/file handler on
+    # every cell and multiplied each line. Store the durable marker on the Logger itself.
+    if _CONFIGURED or getattr(root, "_traceace_configured", False):
+        _CONFIGURED = True
         return root
+
+    # Upgrade a live notebook that already accumulated handlers under the old code.
+    # This namespaced logger is owned entirely by this module.
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+        handler.close()
 
     root.setLevel(level)
     root.propagate = False
@@ -53,4 +64,5 @@ def setup_logging(log_dir: Path | None = None, level: int = logging.INFO) -> log
         root.addHandler(fh)
 
     _CONFIGURED = True
+    root._traceace_configured = True  # type: ignore[attr-defined]
     return root
