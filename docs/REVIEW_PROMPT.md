@@ -1,206 +1,240 @@
-# Independent code review — ROUND 2
+# Independent review — ROUND 3
 
-Paste everything below the line into a fresh reviewer with repo access.
-(Round 1 ran 2026-07-27, found 8 defects, and was cut off mid-validation. Its findings are
-already merged; this brief reflects the post-fix state.)
+> Supersedes the round-1 and round-2 briefs (in git history). Round 1 found 8 defects,
+> round 2 found 4. Both are merged; this brief reflects the post-fix state.
+> Paste everything below the line into a fresh reviewer with repo access.
 
 ---
 
-You are reviewing a machine-learning competition codebase with fresh eyes. Find **correctness
-bugs**, especially silent ones, then propose and implement **improvements**. Read broadly
-before concluding. One verified real bug is worth more than ten speculative ones.
+You are reviewing a solo competition entry for DrivenData's **"Trace the Ace"**: predict
+P(student answers the next question correctly) from a tutoring-session transcript plus a
+learning objective. Metric is **log loss**. Repo `TraceTheAce`, branch `main`, Python 3.12.
 
-## Track record — this is the important context
+Your job, in priority order:
 
-This repo has shipped **twelve** distinct correctness defects. Every one produced valid-looking
-artifacts, raised no error, and passed the verification suite in force at the time. One reached
-the competition leaderboard and scored **below random** (AUROC 0.4933 against a cross-validated
-0.7223). **This is the failure class to hunt: not crashes — plausible wrong answers.**
+1. **Find correctness bugs** — especially *silent* ones that produce plausible numbers while
+   being wrong.
+2. **Fix them**, each with a regression test that fails before and passes after.
+3. **Improve the codebase** where it is genuinely weak.
+4. **Make the notebook correct and runnable**, because a paid GPU session is about to be run
+   through it and it is currently the weakest artifact in the repo.
 
-**Found by the author (after damage):**
-1. OOF frames keyed by name only → a 400-session self-test overwrote the full-data baseline;
-   every reported delta was measured against the wrong reference, headline flipped sign.
-2. Same for model artifacts → a self-test could overwrite the fold models a submission is built
-   from (would have shipped a model trained on 1.7% of the data).
-3. `main.py` computed 110 of 185 features; the rest arrived as NaN, silently accepted.
-4. **Feature-order permutation** — the bundle read its column list from `importance.parquet`,
-   which is *sorted by gain*: a permutation in 179/181 positions. LightGBM reads DataFrames
-   positionally. Every feature scrambled. **All 20 verify checks passed. Cost a real slot.**
+---
 
-**Found by Round 1 review (never caught internally at all):**
-5. **Target-encoding leakage** — `_fold_safe_lo_encoding` wrote one shared array across outer
-   folds, so each fold overwrote the previous fold's leak-free encoding with one derived from
-   data including its own labels. Flipping *only* fold 0's validation labels moved fold 0's own
-   encoding by −0.25. Inflated every CV number in the repo.
-6. **Subsample cohort mismatch** — `cv.build` selected "first N sessions" in *train_features row
-   order*; session-level blocks used *transcript filename order*. At N=400 they overlapped in
-   **9 sessions (2.2%)**. ~98% of self-test rows had all-NaN features. `selftest.all` passed for
-   weeks while testing essentially nothing.
-7. Verifier's prediction check inspected a hardcoded archive, not the caller's.
-8. Stale calibrator survived when "no calibration" won.
-9. Cross-row rules guard could return PASS when the flag was enabled.
-10. Unreadable transcripts produced tree predictions instead of the documented prior fallback.
-11. OOF frames of equal length but different cohorts could be compared.
-12. `ensemble.blend` accepted an implicit experiment list.
+## ⛔ Hard rules — breaking these is worse than any bug you could find
 
-**The pattern:** verification checked *structure* (file exists, columns present, rows aligned,
-values in range) and never asked whether the artifact *works*. Assume more of this shape exists.
+**Competition data must never leave the machine and must never be displayed.** Participants
+agree not to "transmit, duplicate, publish, redistribute or otherwise provide or make
+available the Data to any party not participating in the Competition", and "no competition
+data should be uploaded to an API."
 
-**A diagnostic that was missed for weeks, now enforced:** constant-0.5 predictions score
-ln(2) = 0.6931 on any binary labels. Two container smoke runs scored 0.8543 and 0.8330 —
-*worse than a coin flip*, i.e. confidently wrong — and were dismissed as "fake data,
-meaningless." That one line of arithmetic would have caught bug #4 before it cost a submission.
+Practically, for you:
 
-## Competition context (some constraints risk disqualification)
+- **Never print, quote, echo, or paste verbatim transcript content, learning-objective text,
+  or student/tutor utterances** — not in your reasoning, not in your report, not into a
+  scratch file. Work from **aggregates**: counts, rates, distributions, correlations. If you
+  need an example to reason about a bug, compute the **statistic**, not the text.
+- **Never commit data.** `.gitignore` plus `.git/hooks/pre-commit` block it. Data lives in
+  `data/raw/` and on Drive, never in git. If you touch those patterns, verify the hook still
+  blocks a `.csv` *and* that test files are still tracked — a previous edit made CI silently
+  collect **zero tests** for days.
 
-- **Task:** predict P(student answers next question correctly) from a K-12 tutoring transcript
-  plus a learning-objective description. Metric **log loss**. 35,072 train rows / 22,821
-  sessions; 10,508 test rows. One session yields up to 10 rows **sharing a transcript** — so CV
-  groups by `session_id`, never `response_id`.
-- **Submission is code.** A zip with `main.py` at root runs offline (Python 3.12, CUDA 12.9,
-  1×A100, **no network**, 6h cap, logs capped 500 lines × 500 chars).
-- **Disqualification risks:**
-  - `main.py` must never print/log anything derived from test data — no excerpts, no counts,
-    no aggregates. Static strings only.
-  - Each test sample processed **independently**. Organizer ruling: *"the only input to your
-    model drawn from the test should be that sample's metadata and transcript."* Features
-    derived by grouping test rows are **prohibited** (config flag + verify check enforce this).
-  - External models/data must be openly licensed **including for development**; competition
-    data must never be uploaded to an API.
-- **3 submissions/week**, ~2 remaining this week. Current leaderboard: rank #229 from the
-  broken submission; a fixed one is pending.
+**Never tune against leaderboard feedback.** 3 submissions/week; the leaderboard is not a
+validation set.
 
-## Architecture
+**Never claim a gain without repeated-seed evidence.** At 35K rows the paired per-fold delta
+SD is ≈5e-4 and the headline moves 0.00105 across fold assignments. Any single-seed
+improvement below ~1e-3 is noise. Use `interpret.ablation_repeated` / `evaluate.repeated`,
+which report mean ± SD.
+
+---
+
+## Orientation
 
 ```
-src/traceace/            ~10.8k LOC, 53 files
-  tasks.py               registry: tier guard, manifests, budget ledger. All work runs
-                         through tasks.run(name, **kw).
-  config/paths/runtime/budget/staging   infra; paths.py guards against iterating a Drive mount
-  cv.py                  StratifiedGroupKFold grouped by session_id
-  features/              structural, linguistic, temporal, lo_alignment, feedback,
-                         trajectory(+lo_position), embeddings, window_embeddings, content,
-                         assemble, common
-  models/                baseline (prior, lo_only), gbdt (LightGBM), move_classifier
-  evaluate.py            metrics, OOF persistence, cohort-compatibility checks
-  repeated.py            repeated-seed CV: paired deltas, mean ± SD
-  experiments.py         evaluate.repeated, interpret.ablation_repeated
-  unseen_lo.py           stress test on objectives absent from training
-  annotate.py            tutoring-move annotation (heuristic + vLLM backends)
+src/traceace/
+  tasks.py               registry + tier guard; run via traceace.tasks.run(name, **kw)
+  cv.py                  StratifiedGroupKFold(groups=session_id)  ← never response_id
+  features/              assemble.py (block registry), structural, linguistic, temporal,
+                         feedback, trajectory, lo_position, lo_alignment, embeddings, content
+  models/gbdt.py         LightGBM, 5 folds, fold-safe target encoding
+  unseen_lo.py           evaluate.unseen_lo + calibrate.shrinkage
   packaging/
-    inference_lib.py     SHARED feature code, copied verbatim into the zip
-    main_template.py     the generated main.py
-    build_submission.py  assembles the zip
+    build_submission.py  writes submission.zip
+    inference_lib.py     SHARED train/serve feature code — copied VERBATIM into the zip
+    main_template.py     the main.py that ships
     verify.py            24 checks
-tests/                   66 tests, 5 files
-docs/                    15 files. STATE.md = status; DECISIONS.md = 15 ADRs explaining every
-                         bug above and why each fix is shaped as it is.
+conf/base.yaml           paths, seed, cv, unit-rate table (never hardcode rates)
+notebooks/Trace_the_Ace_Runner.ipynb     the Colab wrapper  ← WEAKEST ARTIFACT
+docs/                    BRIEF.md (spec), STATE.md (status), DATA.md (measured facts),
+                         DECISIONS.md (ADR-001..018), FINDINGS.md (paper draft)
 ```
-
-**Read `docs/STATE.md` and `docs/DECISIONS.md` first.** ADR-013/014/015 cover the four most
-recent defects in detail.
-
-## Known blind spots — verified gaps, start here
-
-These are measured, not guessed:
-
-**A. Modules with zero test coverage:** `features/window_embeddings.py`, `models/move_classifier.py`.
-
-**B. Tasks that have never once been executed:** `ensemble.blend`, `features.embeddings`,
-`maintenance.sync_artifacts`. Code that has never run is code that has never been right.
-
-**C. The GPU path is entirely unexercised at scale.** `features/window_embeddings.py` +
-`features/content.py` (pooled embeddings → PCA) were validated only on 40 sessions on CPU. They
-are staged for an L4 run that has not happened. Review them as if they are about to run and cost
-real money.
-
-**D. Determinism is never tested.** Nothing asserts that running the same task twice produces
-identical artifacts. Given how many bugs here were state/ordering related, this seems worth a
-test.
-
-**E. `docs/` may now contradict the code.** Several ADRs were written before their own fixes were
-revised. A doc that misstates behaviour is a real defect — it is how bug #5 hid (an accurate
-docstring describing an implementation that did something else).
-
-**F. `interpret.ablation_repeated` and `unseen_lo` results in FINDINGS.md were all measured
-under the leakage of bug #5** and have not been re-run. Are the harnesses themselves correct
-now?
-
-## Highest-risk areas, in priority order
-
-1. **Train/serve parity.** `features/*` vs `packaging/inference_lib.py`. `lo_alignment` now
-   delegates to the shipped implementation; check the others genuinely share code rather than
-   merely agreeing today. Do parity tests cover every block *and every feature*, or a sample?
-2. **`main.py`** (generated from `main_template.py`). It has `try/except` blocks around feature
-   computation. Which swallow errors, and should they? What happens with an empty transcript, a
-   malformed CSV, a session file that is missing entirely, a duplicate `response_id`?
-3. **Leakage.** `models/gbdt.py::_fold_safe_lo_encoding` (recently rewritten — verify the fix is
-   actually correct, don't take the ADR's word), `calibration.py`'s inner loop, `unseen_lo.py`'s
-   session-preserving split, `cv.py`. Any path where a label influences its own prediction.
-4. **Artifact identity.** Bugs 1, 2 and 6 were all "two things that should mean the same thing
-   didn't." Caches now carry a source hash; OOF and model dirs are namespaced by
-   subsample/cv_seed. Find the next collision *before* it happens. Is anything still keyed on
-   something that can vary silently — block set, config flags, feature-order?
-5. **The rules boundary.** Can a cross-row value reach the model by any route? Does `main.py`
-   derive anything from more than the row being scored? Does anything print test-derived data?
-6. **Statistical validity.** `repeated.py` and `experiments.py`. Measured noise floor on paired
-   log-loss deltas is ~5e-4 and several reported effects sit near it. Is the pairing right? Are
-   the intervals honest? Is the unseen-LO split sound?
-
-## Also wanted: improvements, not just bug fixes
-
-The brief for round 1 asked only for correctness. This time also propose and implement:
-
-- **Deletions.** This grew fast under time pressure. What is unused, over-abstracted, or
-  earning less than it costs to maintain? I would rather delete code than keep it.
-- **Speed.** Feature builds take ~20 min over 22.8k sessions; `selftest.all` takes 75 s. Both
-  are on the critical path of every iteration. Profile before optimizing.
-- **Making the remaining silent paths loud.** Anywhere a wrong answer is possible without an
-  error, propose the assertion that would surface it.
-- **Test quality.** 66 tests exist and they missed 8 defects. Which are load-bearing and which
-  are theatre? Mutation-style tests (change an input that shouldn't matter, assert the output
-  doesn't move) proved far more effective here than assertion-count.
-
-## What a useful finding looks like
-
-- **A concrete failure scenario**: specific input → specific wrong output. Not "this is fragile."
-- **Verified.** You can run everything (below). A reproduction beats an argument.
-- **Ranked by blast radius**: corrupts a submission / invalidates a reported number / offends
-  taste. Say which.
-- **If you can produce a working patch, do**, and run the suite before and after.
-
-Explicitly say where you looked and found **nothing** — that tells me where to stop looking.
-
-## Please don't spend time on
-
-- Style, formatting, type annotations — `ruff` and `mypy` are clean and CI-enforced.
-- Proposing new features or model architectures. Correctness and simplification, not ideas.
-- Re-reporting the twelve defects above.
-
-## How to run things
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
-.venv/bin/pytest -q                                    # 66 tests
-.venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy
-.venv/bin/python -c "import traceace; traceace.configure(repo_dir='.', quiet=True); \
-    traceace.tasks.run('selftest.all')"                # end-to-end on real data, ~75s
-.venv/bin/python -c "import traceace; traceace.configure(repo_dir='.', quiet=True); \
-    traceace.tasks.run('submission.verify', smoke=True)"   # 24 checks incl. prediction sanity
+.venv/bin/pytest                                    # 74 tests, ~1.4 s
+.venv/bin/ruff check . && .venv/bin/mypy
 ```
 
-Real competition data is present under `data/raw/` (gitignored, non-redistributable). Feature
-caches in `data/features/`, models in `artifacts/models/`, run manifests in `runs/`.
+Every task requires `traceace.configure(repo_dir=".")` first or it raises.
 
-**Data handling:** competition rules prohibit transmitting the data to third parties. Work from
-aggregates — counts, rates, distributions. **Do not print verbatim transcript or
-learning-objective text** into logs or your context.
+Read `docs/BRIEF.md` (authoritative spec), then `docs/STATE.md`, then `docs/DATA.md` for
+measured data facts, before touching features or models.
 
-## Deliverable
+---
 
-A ranked list of findings, each with: what breaks, how you verified it, blast radius, proposed
-patch. Then a short list of improvements with the reasoning for each.
+## Priority 0 — the notebook (this is why you were called)
 
-If you run low on budget, **prioritise depth over breadth** — finish and validate what you have
-started rather than opening a new track. Round 1 ended mid-validation with an unverified patch
-set, which cost real time to check by hand afterwards.
+`CLAUDE.md` calls the notebook "a thin stable wrapper" around the package. It has **drifted
+from the package** and is about to drive a paid GPU run. A measured diff of its `run("...")`
+calls against the task registry shows **9 of 38 tasks unreachable**, and the gaps are not
+cosmetic:
+
+- **Cell 12 builds `structural, linguistic, temporal, lo_alignment`.** It omits
+  **`features.feedback` and `features.trajectory`**. Trajectory is the single strongest block
+  (**+0.00226 ± 0.00011**). Meanwhile `lo_alignment` measures **−0.00030 ± 0.00024** — it
+  *hurts* — and is still built. A clean notebook run therefore trains on the wrong block set.
+- **Cell 26 never calls `calibrate.shrinkage`.** Deployment shrinkage (ADR-017) is worth
+  **+0.00715**, an order of magnitude more than any feature block. A notebook-driven rebuild
+  silently ships a submission without it, undoing the largest single gain in the project.
+- Also unreachable: `evaluate.unseen_lo`, `selftest.all`, `features.feedback`,
+  `features.trajectory`, `features.embeddings`, `eda.roles`, `eda.lo_conditioning`,
+  `ensemble.blend`.
+- Cell 26 calls `run("submission.verify", smoke=True)`. Check `smoke=True` still means what
+  the cell author intended after ADR-018 changed how the format file is resolved.
+
+**What to do.** Make the notebook produce *exactly* the pipeline the package considers
+current, and make that property **enforced by a test rather than by care** — e.g. parse the
+notebook's `run(...)` calls and assert the set matches an explicit declared manifest, so
+adding a task without wiring it in fails CI. A wrapper that can drift silently *will* drift
+again; this is the second time one has silently dropped features, and the first cost a
+submission.
+
+Then confirm the notebook is safe to run top-to-bottom on a fresh Colab: cell ordering, the
+Drive-mount/clone/`sync()` cell, tier annotations matching each task's real `requires=`, and
+GPU cells marked so an operator cannot leave an L4 attached and idle through the CPU cells.
+Idle attached GPUs are the project's #1 unit waste; the budget is 733 units with ~733 left.
+
+---
+
+## Priority 1 — the GPU path, which has never executed at scale
+
+`features.window_embeddings` / `features.embeddings` (BAAI/bge-small-en-v1.5, MIT) and
+`features.content` (pooled top-k window vectors → PCA-48) are **validated on CPU at 40–500
+sessions and never run at full scale**. Real units are about to be spent on them.
+
+Audit for what only breaks at scale or only on GPU:
+
+- batching and OOM behaviour; whether a mid-run failure loses all completed work
+  (is there resumability, or does an 8-hour run restart from zero?)
+- **producer/consumer cache-path agreement.** This has already broken once: a source-hash
+  change made `features.window_embeddings` write to one path while
+  `lo_alignment(backend="embedding")` read another, so a *paid* extraction would have
+  reported "missing". Re-verify by **executing both**, not by reading.
+- dtype/device assumptions, `.cpu()`/`.numpy()` transfers, deterministic seeding
+- **PCA fold discipline** in `features.content`. If PCA is fit across all rows including
+  validation folds, it leaks — the exact shape of the target-encoding bug already shipped
+  here. Check this specifically.
+- `annotate.moves` with `backend="vllm"` is written but **never executed** (~40 units). It
+  must run fully locally; competition data may not be sent to any API.
+
+---
+
+## Priority 2 — general bug hunt
+
+Assume the model is subtly broken until proven otherwise. **Thirteen silent-correctness
+defects have already been found here.** Four reached a submission; one scored *below random*
+on the leaderboard. Every one was live while the test suite was green — so a passing suite is
+weak evidence, not a clean bill of health.
+
+### Already found and fixed — don't re-report, but *do* check the fixes hold
+
+| # | Defect | ADR |
+|---|---|---|
+| 1 | `.gitignore` `test_*` swallowed all test files; CI collected 0 tests | — |
+| 2 | pandas-3 pyarrow `cumsum` on booleans | — |
+| 3 | OOF clobbering: subsampled runs overwrote full-data baselines, flipping the reported delta's sign | ADR-015 |
+| 4 | Model-artifact clobbering: selftest could overwrite submission fold models | ADR-015 |
+| 5 | `main.py` produced 110 of 181 features — feedback/trajectory/lo_position never wired in, arriving as NaN | ADR-010 |
+| 6 | **Feature-order permutation**: bundle took column order from `importance.parquet` (sorted by gain), permuting 179/181 positions; LightGBM reads positionally. Shipped: LB 0.8006, AUROC 0.4933, rank #229 | ADR-013 |
+| 7 | sklearn 1.9.0 local vs 1.8.0 in the container | ADR-012 |
+| 8 | **Target-encoding leakage**: one `enc` array shared across outer folds; flipping fold 0's validation labels moved its own encoding by −0.25. Inflated every CV number before 2026-07-27 | ADR-014 |
+| 9 | Subsample cohort mismatch: 2.2% row overlap at N=400; selftest 98% NaN | ADR-014 |
+| 10 | Embedding producer/consumer path mismatch (see Priority 1) | ADR-015 |
+| 11 | Move-classifier session leakage: all 50 sessions on both sides | ADR-016 |
+| 12 | Duplication / stale caches / coin-flip triage | ADR-015 |
+| 13 | **A verify check that could never fire**: `submission.verify` resolved its CSV to `_staging/` (the zip *build* dir, which never holds one) while `submission.smoke` writes to `_smoke/`. All nine output checks — including `row_ORDER_matches`, the guard for defect #6 — silently never ran, and the report still read green | ADR-018 |
+
+### The pattern worth generalizing
+
+Defects #5, #6 and #13 are one species: **verification that inspects structure but never
+exercises behaviour**, with green checks read as evidence. Hunt that shape:
+
+- guards whose condition can never be true
+- broad `except: pass` that converts a failure into a plausible default
+- silent defaults where a config or artifact is missing (`CLAUDE.md` requires: *fail fast and
+  loud on bad config, never silently default*)
+- fallback values that could be mistaken for real predictions
+- assertions that compare a value to itself, or to something derived from the same expression
+  under test
+
+### Specific things to scrutinize
+
+- **`inference_lib.py` train/serve parity.** It is copied verbatim into the zip and is the
+  one place training and serving can diverge. Confirm every serve-time feature is computed
+  identically at train time **by running both and comparing arrays**, not by reading. Both
+  paths import it, so any divergence must come from state, config, or column ordering — find
+  which.
+- **`_fold_safe_lo_encoding` in `models/gbdt.py`**, rewritten after defect #8. Verify it is
+  genuinely fold-safe: perturb one fold's validation labels, assert no other fold's encoding
+  moves.
+- **Cross-row features are PROHIBITED** — each test sample must be processed independently.
+  `features/assemble.py` holds a `CROSS_ROW_FEATURES` frozenset and
+  `verify.verify_no_cross_row_features` checks the bundle. Confirm nothing has crept in. A
+  violation here is **disqualification**, not a score penalty.
+- **Deployment shrinkage** (`unseen_lo.py`, ADR-017): `p' = base + w·(p − base)`, w=0.55,
+  base=0.70247, fitted on a 34,446-row unseen-objective holdout. Verify the holdout is
+  genuinely objective-disjoint **and** session-disjoint, that `w` is not fitted on rows used
+  to train the boosters, and that the applied `base_rate` matches the fitted one.
+- **`docs/FINDINGS.md` contains numbers measured under defect #8** — the ablation table and
+  the `evaluate.unseen_lo` figures are stale and need re-running. Flag any other doc claim a
+  fresh run contradicts. This entry competes for a **publication bonus**, so a wrong number in
+  the write-up is a real cost, not a cosmetic one.
+
+---
+
+## Deliverables
+
+Per finding:
+
+1. **File and line**, plus a one-sentence statement of the defect.
+2. **A concrete failure scenario** — inputs/state → wrong output. If you can't construct one,
+   label it *suspicion*, not *bug*.
+3. **Evidence you actually ran**: command and real output. "Looks wrong" is not a finding; a
+   leakage claim needs the perturbation experiment, not an argument.
+4. **The fix**, plus a regression test that fails before and passes after.
+5. **Severity**: does it change predictions, waste units, or risk disqualification?
+
+Then give me:
+
+- an ordered list of what you changed and why
+- anything suspicious you could **not** confirm — a ranked list of doubts beats false confidence
+- **anything wrong with the approach itself**, not just the code. The CV-to-LB gap is ~0.068
+  and calibration turned out to be worth more than every feature combined; say so if you think
+  the modelling strategy is misdirected.
+
+Gates that must be green when you finish:
+
+```bash
+.venv/bin/ruff check . && .venv/bin/ruff format --check .
+.venv/bin/mypy
+.venv/bin/pytest
+.venv/bin/python -c "
+import traceace; traceace.configure(repo_dir='.')
+from traceace import tasks; tasks.run('selftest.all')"
+```
+
+plus `submission.verify` at **24 checks, 0 failures**.
+
+**Do not rebuild `submission/submission.zip`** unless a fix requires it. A verified artifact
+is on disk (md5 `8e505946aa830014c384f8ac97259ad4`) queued for submission. If your changes
+invalidate it, say so **loudly, at the top of your report**.
