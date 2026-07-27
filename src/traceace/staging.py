@@ -79,11 +79,19 @@ def stage_local(force: bool = False) -> Path:
         with heartbeat("copy raw.zip from Drive"):
             shutil.copyfile(drive_zip, local_zip)
         _extract_archive(local_zip, rdir)
-    else:
-        # Local path: data already in data/raw/. Extract transcripts zip if needed.
-        tzip = rdir / cfg.canonical_files["transcripts_zip"]
-        if tzip.is_file() and not transcripts_dir().is_dir():
-            _extract_archive(tzip, transcripts_dir().parent, into_named_dir=True)
+
+    # raw.zip contains the original transcript archive as one of its five members.
+    # Extracting the outer archive is therefore only half of staging. This used to run
+    # only in local mode, so a fresh Colab stopped with "no transcript CSVs" immediately
+    # after successfully copying and extracting raw.zip.
+    tzip = rdir / cfg.canonical_files["transcripts_zip"]
+    if tzip.is_file() and not is_staged():
+        _extract_archive(tzip, transcripts_dir().parent, into_named_dir=True)
+
+    if not is_staged():
+        raise FileNotFoundError(
+            f"staging completed but no transcript CSVs were found under {transcripts_dir()}"
+        )
 
     log.info("stage_local: staged at %s", rdir)
     return rdir

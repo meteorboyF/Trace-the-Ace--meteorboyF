@@ -174,6 +174,39 @@ def test_stage_local_is_noop_when_already_staged(tmp_path, monkeypatch):
     assert calls["extract"] == 0, "staging must be a no-op when already staged"
 
 
+def test_colab_staging_extracts_nested_transcript_archive(tmp_path):
+    import io
+    import zipfile
+
+    drive = tmp_path / "drive"
+    work = tmp_path / "work"
+    (drive / "data").mkdir(parents=True)
+
+    nested_buffer = io.BytesIO()
+    with zipfile.ZipFile(nested_buffer, "w") as nested:
+        nested.writestr(
+            "s1.csv",
+            "session_id,utterance_id,role,content,timestamp\ns1,0,tutor,synthetic,0:00:01\n",
+        )
+    with zipfile.ZipFile(drive / "data" / "raw.zip", "w") as outer:
+        outer.writestr("train_transcripts.zip", nested_buffer.getvalue())
+        outer.writestr(
+            "train_features.csv",
+            "response_id,session_id,learning_objective_id,learning_objective\n"
+            "r1,s1,lo1,synthetic\n",
+        )
+        outer.writestr("train_labels.csv", "response_id,is_correct\nr1,1\n")
+        outer.writestr("submission_format.csv", "response_id,probability\nx,0.5\n")
+        outer.writestr("submission_format_smoke.csv", "response_id,probability\nx,0.5\n")
+
+    traceace.configure(repo_dir=_repo_root(), drive_root=drive, work_dir=work, quiet=True)
+    from traceace.staging import stage_local
+
+    stage_local()
+
+    assert (work / "data" / "raw" / "train_transcripts" / "s1.csv").is_file()
+
+
 # --- progress kill switch ----------------------------------------------------
 def test_progress_disabled_by_env(monkeypatch):
     monkeypatch.setenv("TRACEACE_PROGRESS", "0")

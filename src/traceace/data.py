@@ -75,8 +75,14 @@ def _classify_csv(path: Path) -> str | None:
     description="normalize suffixed download filenames by content shape; validate schemas",
 )
 def ingest(force: bool = False, subsample: int | None = None) -> dict[str, Any]:
+    # On a fresh Colab the canonical CSVs exist only inside Drive's raw.zip. Stage before
+    # classifying them; otherwise ingest emits missing-file warnings and reports success.
+    # Local/unit-test callers may intentionally provide only CSVs, so staging is needed
+    # only when the raw directory has no CSV input at all.
     rdir = raw_dir()
     rdir.mkdir(parents=True, exist_ok=True)
+    if not any(rdir.glob("*.csv")):
+        stage_local()
 
     renamed: dict[str, str] = {}
     warnings: list[str] = []
