@@ -190,9 +190,10 @@ def restore_from_drive(
             raise RuntimeError(f"cache archive {source} does not have exactly one root")
         extract_root = cfg.work_dir / destination_parent if destination_parent else cfg.work_dir
         destination = extract_root / next(iter(roots))
-        if destination.exists() and not force:
-            log.info("restore_from_drive: %s exists (skip)", destination)
-            return destination
+        # tasks.run() calls ensure_dirs() before every task, so artifacts/, runs/, and cache
+        # directories already exist even on a fresh runtime. Existence is not evidence that
+        # their Drive archive was restored; the old guard skipped every archive and silently
+        # forced full recomputation. Tar extraction is an intentional merge/overwrite.
         extract_root.mkdir(parents=True, exist_ok=True)
         with heartbeat("restore cache from Drive"):
             tf.extractall(extract_root, filter="data")

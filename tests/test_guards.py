@@ -272,6 +272,28 @@ def test_artifact_sync_includes_paid_feature_caches(tmp_path, monkeypatch):
     assert "cache/interim.tar" in destinations
 
 
+def test_restore_merges_into_precreated_task_directory(tmp_path):
+    import tarfile
+
+    drive = tmp_path / "drive"
+    work = tmp_path / "work"
+    source_dir = tmp_path / "source" / "features"
+    source_dir.mkdir(parents=True)
+    (source_dir / "cached.parquet").write_text("synthetic")
+    (drive / "cache").mkdir(parents=True)
+    with tarfile.open(drive / "cache" / "features.tar", "w") as archive:
+        archive.add(source_dir, arcname="features")
+
+    # Mirrors tasks.ensure_dirs(): the destination exists but contains no restored cache.
+    (work / "data" / "features").mkdir(parents=True)
+    traceace.configure(repo_dir=_repo_root(), drive_root=drive, work_dir=work, quiet=True)
+    from traceace.staging import restore_from_drive
+
+    restore_from_drive("cache/features.tar", destination_parent="data")
+
+    assert (work / "data" / "features" / "cached.parquet").is_file()
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
