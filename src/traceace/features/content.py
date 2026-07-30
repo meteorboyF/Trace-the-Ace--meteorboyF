@@ -1,4 +1,4 @@
-"""Content block — *what was said*, as reduced dense vectors.
+"""Content block — *what was said*, as pooled dense vectors.
 
 **The design point.** Collapsing window embeddings to a single cosine scalar (as
 ``lo_alignment`` does) throws away almost everything the encoder computed: it answers
@@ -6,18 +6,17 @@
 orthogonal kinds of evidence. Talk ratio, feedback ratios and disfluency all describe the
 *form* of the interaction; the pooled embedding describes its *content*.
 
-So this block pools the top-k LO-relevant window vectors and reduces them with PCA to a
-modest number of components, which go into the GBDT as ordinary numeric features. PCA
-rather than raw 384 dims because:
+This block pools the top-k LO-relevant window vectors and stores the raw frozen-encoder
+coordinates. Dimensionality reduction is deliberately deferred to model training, where
+PCA is fit independently inside each outer training fold. Fitting one global PCA before
+cross-validation lets validation covariates influence the representation and makes an
+honest deployment comparison unnecessarily ambiguous.
 
 * trees split on one feature at a time and handle a few dense informative axes far better
   than hundreds of thin correlated ones;
 * it keeps the block comparable in width to the others, so the ablation is a fair test;
-* it keeps the submission asset small.
-
-**Fitted on training data only.** The PCA basis is estimated from training windows and
-persisted, so inference is a pure transform — no test-set fitting, which the rules require
-and which also keeps the block deterministic.
+The fold-specific PCA transforms remain research artifacts until encoder inference is
+implemented in the submission.
 
 Requires ``features.window_embeddings`` (GPU, once). Without it this task fails loudly
 rather than silently degrading.
@@ -36,7 +35,7 @@ from ..config import get_config
 from ..io import load_train_features
 from ..logging_utils import get_logger
 from ..paths import interim_dir, transcripts_dir
-from ..progress import heartbeat, pbar
+from ..progress import pbar
 from ..staging import stage_local
 from ..tasks import task
 from .common import block_cache_path, normalize_frame
@@ -44,12 +43,12 @@ from .lo_alignment import TOPK, _windows
 
 log = get_logger("features.content")
 
-VERSION = "v1"
+VERSION = "v2"
 
 # Cache key includes a hash of the code that computes this block, so editing the
 # computation invalidates the cache automatically (see common.source_digest).
 _SRC: str | None = None
-PREFIX = "cont_"
+PREFIX = "cont_raw_"
 DEFAULT_COMPONENTS = 48
 
 
@@ -119,17 +118,10 @@ def build(
     CPU task: the GPU cost lives entirely in ``features.window_embeddings``; this is a
     pooling + PCA pass over cached vectors.
     """
-    import joblib
-    from sklearn.decomposition import PCA
-
-    from .window_embeddings import (
-        DEFAULT_MODEL,
-        artifact_tag,
-    )
+    from .window_embeddings import DEFAULT_MODEL
 
     cfg = get_config()
     model_name = str(cfg.get("embeddings", "alignment_model", default=DEFAULT_MODEL))
-    tag = artifact_tag(model_name)
     win_path, lo_path = _embedding_paths(model_name, subsample)
 
     if not win_path.is_file() or not lo_path.is_file():
@@ -140,7 +132,7 @@ def build(
 
     path = block_cache_path(
         "content",
-        f"{VERSION}_k{n_components}_top{topk}",
+        f"{VERSION}_raw_top{topk}",
         subsample,
         source_hash=_source(),
     )
@@ -196,26 +188,14 @@ def build(
             raise RuntimeError("no content vectors pooled — window embeddings may be stale")
 
         X = np.vstack(pooled).astype(np.float32)
-        k = int(min(n_components, X.shape[1], max(X.shape[0] - 1, 1)))
-
-        # PCA basis is fit on TRAINING pooled vectors only, then persisted for inference.
-        pp = pca_path(tag, k, topk, subsample, _source())
-        with heartbeat(f"PCA fit ({X.shape[0]} x {X.shape[1]} -> {k})"):
-            pca = PCA(n_components=k, random_state=cfg.seed)
-            Z = pca.fit_transform(X)
-        pp.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump({"pca": pca, "n_components": k, "model": model_name}, pp)
-        log.info(
-            "content PCA: %d -> %d dims, explained variance %.3f -> %s",
-            X.shape[1],
-            k,
-            float(pca.explained_variance_ratio_.sum()),
-            pp,
-        )
-
-        out = pd.DataFrame(Z, columns=[f"{PREFIX}{i:02d}" for i in range(k)])
+        out = pd.DataFrame(X, columns=[f"{PREFIX}{i:03d}" for i in range(X.shape[1])])
         out.insert(0, "session_id", [s for _, s in ids])
         out.insert(0, "response_id", [r for r, _ in ids])
+        log.info(
+            "content raw pool: %d responses x %d dims; PCA will be fit inside each CV fold",
+            len(out),
+            X.shape[1],
+        )
         return out
 
     out = load_or_compute(path, compute, force=force, label="features.content")
@@ -223,6 +203,6 @@ def build(
         "output_path": str(path),
         "n_responses": int(len(out)),
         "n_features": int(out.shape[1] - 2),
-        "n_components": n_components,
+        "n_components": int(out.shape[1] - 2),
         "model": model_name,
     }

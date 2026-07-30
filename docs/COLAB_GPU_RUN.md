@@ -43,10 +43,11 @@ Switch to an **L4**, leave `RUN_FULL_GPU = False`, and run only the semantic GPU
 
 ```python
 run("features.window_embeddings", subsample=500)
-run("features.embeddings", subsample=500)
 ```
 
-Proceed only if both complete, cache paths are printed, no OOM occurs, and the budget report
+Leave `RUN_EXPERIMENTAL_GPU = False`; the unrelated ModernBERT and vLLM research jobs are
+not part of this path. Proceed only if the BGE smoke completes, its cache path is printed,
+no OOM occurs, and the budget report
 shows the expected L4 rate.
 
 ## 4. Full semantic extraction
@@ -75,16 +76,20 @@ Reconnect to **CPU + High RAM**, run setup and:
 
 ```python
 run("maintenance.restore_artifacts")
-run("features.lo_alignment", backend="embedding", force=True)
+run("features.lo_alignment", backend="embedding")
 run("features.content")
-run("interpret.ablation_repeated")
+run("evaluate.semantic_repeated")
+run("maintenance.sync_artifacts")
 ```
 
 Interpretation gates:
 
 - Do not use single-seed scores.
-- Require a paired repeated-seed improvement whose interval excludes zero.
-- Treat the current global-PCA content result as exploratory until PCA is fitted per CV fold.
+- Require a paired repeated-seed gain of at least 0.001 whose interval excludes zero and
+  whose sign agrees across all seeds.
+- Content PCA is fitted independently inside every outer CV training fold.
+- Production keeps the explicit lexical alignment cache; BGE alignment has a separate
+  research cache identity and cannot silently replace it.
 - Do not call `submission.build` on an experiment containing `cont_`, `emb_`, or `move_`;
   the build now refuses these research-only feature families.
 
@@ -93,9 +98,8 @@ Interpretation gates:
 Copy only aggregate task output—never transcript or learning-objective text:
 
 - `features.window_embeddings`: wall time, window count, dimensions, cache paths.
-- `features.embeddings`: wall time, session count, dimensions.
 - `features.lo_alignment`: response count and feature count.
-- `interpret.ablation_repeated`: mean ± SD and 95% interval for each changed block.
+- `evaluate.semantic_repeated`: paired mean ± SD and 95% interval for both BGE variants.
 - `budget.report`: units spent and remaining.
 - Any traceback, with paths/IDs redacted if necessary.
 

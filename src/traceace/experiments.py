@@ -195,3 +195,101 @@ def ablation_repeated(
     print(format_table(results))
     print(f"\nall_blocks logloss: {full_summary.mean:.5f} ± {full_summary.sd:.5f}")
     return out
+
+
+@task(
+    "evaluate.semantic_repeated",
+    requires="cpu",
+    max_tier="cpu",
+    description="paired deployable-vs-BGE comparison with fold-safe content PCA",
+)
+def semantic_repeated(
+    force: bool = False,
+    subsample: int | None = None,
+    seeds: tuple[int, ...] | list[int] = DEFAULT_SEEDS,
+    num_boost_round: int = 1200,
+    early_stopping_rounds: int = 80,
+    promotion_threshold: float = 0.001,
+) -> dict[str, Any]:
+    """Compare the deployable stack against both BGE feature hypotheses.
+
+    The embedding-alignment cache is selected explicitly rather than through the
+    production lexical alias. Content PCA is fit by :func:`models.gbdt.train` inside
+    every outer training fold. Positive paired deltas mean the BGE variant improved
+    log loss relative to the deployable baseline.
+    """
+    from .features.assemble import DEFAULT_BLOCKS
+    from .models.gbdt import train
+
+    seeds = list(seeds)
+    configs = {
+        "deployable": list(DEFAULT_BLOCKS),
+        "bge_alignment": [*DEFAULT_BLOCKS, "lo_alignment_embedding"],
+        "bge_content": [*DEFAULT_BLOCKS, "content"],
+    }
+    scores: dict[str, dict[int, float]] = {name: {} for name in configs}
+
+    with pbar(total=len(seeds) * len(configs), desc="semantic comparison", unit="fit") as bar:
+        for s in seeds:
+            _ensure_folds_and_baseline(s, subsample)
+            for name, blocks in configs.items():
+                result = _quiet(
+                    train,
+                    experiment=f"semantic.{name}",
+                    blocks=blocks,
+                    cv_seed=s,
+                    subsample=subsample,
+                    num_boost_round=num_boost_round,
+                    early_stopping_rounds=early_stopping_rounds,
+                )
+                scores[name][s] = float(result["logloss"])
+                bar.update(1)
+
+    score_summaries = {
+        name: summarize(f"{name} logloss", [values[s] for s in seeds], seeds)
+        for name, values in scores.items()
+    }
+    improvements = {
+        name: summarize(
+            f"{name} improvement",
+            [scores["deployable"][s] - scores[name][s] for s in seeds],
+            seeds,
+        )
+        for name in ("bge_alignment", "bge_content")
+    }
+    promoted = {
+        name: bool(
+            result.mean >= promotion_threshold
+            and result.ci95[0] > 0
+            and result.n_same_sign == result.n
+        )
+        for name, result in improvements.items()
+    }
+    eligible = [name for name, ok in promoted.items() if ok]
+    winner = max(eligible, key=lambda name: improvements[name].mean) if eligible else None
+
+    out: dict[str, Any] = {
+        "seeds": seeds,
+        "configs": configs,
+        "scores": {name: result.to_dict() for name, result in score_summaries.items()},
+        "improvement_vs_deployable": {
+            name: result.to_dict() for name, result in improvements.items()
+        },
+        "promotion_threshold": promotion_threshold,
+        "promoted": promoted,
+        "winner": winner,
+        "logloss": score_summaries["deployable"].mean,
+    }
+    d = runs_dir() / "repeated"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "semantic_comparison.json"
+    path.write_text(json.dumps(out, indent=2, default=str))
+    out["output_path"] = str(path)
+
+    print("\nPAIRED BGE improvement over deployable baseline (positive is better)\n")
+    print(format_table(list(improvements.values()), value_label="gain"))
+    print(
+        f"\npromotion gate: gain >= {promotion_threshold:.4f}, CI above zero, "
+        f"and same sign in every seed\npromoted: {promoted}"
+    )
+    return out

@@ -221,6 +221,34 @@ def test_content_pca_is_namespaced_by_cohort_and_pooling(synth_repo):
     assert len({full, smoke, other_pool}) == 3
 
 
+def test_fold_safe_content_pca_never_fits_validation_covariates():
+    """Changing validation rows cannot alter the representation of training rows."""
+    from traceace.models.gbdt import _fold_safe_pca
+
+    rng = np.random.default_rng(123)
+    raw = rng.normal(size=(20, 6)).astype(np.float32)
+    train = np.zeros(20, dtype=bool)
+    train[:15] = True
+    validation = ~train
+
+    original = _fold_safe_pca(raw, train, validation, n_components=3, seed=7)
+    perturbed = raw.copy()
+    perturbed[validation] += 10_000
+    changed = _fold_safe_pca(perturbed, train, validation, n_components=3, seed=7)
+
+    np.testing.assert_allclose(original[train], changed[train], atol=1e-6)
+    assert not np.allclose(original[validation], changed[validation])
+
+
+def test_semantic_alignment_has_an_explicit_nonproduction_cache_alias():
+    """Research BGE alignment must never silently replace production lexical features."""
+    from traceace.features.assemble import BLOCKS
+
+    assert BLOCKS["lo_alignment"][1] == "v1_lexical"
+    assert BLOCKS["lo_alignment_embedding"][1] == "v1_embedding"
+    assert BLOCKS["lo_alignment"][0] == BLOCKS["lo_alignment_embedding"][0]
+
+
 def test_move_classifier_holdout_is_session_disjoint():
     from traceace.models.move_classifier import _grouped_split
 

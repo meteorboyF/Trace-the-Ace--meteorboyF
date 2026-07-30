@@ -52,6 +52,29 @@ LO_COL = "learning_objective_id"
 LO_ENC_COL = "lo_prior_enc"
 
 
+def _fold_safe_pca(
+    raw: np.ndarray,
+    train_mask: np.ndarray,
+    validation_mask: np.ndarray,
+    n_components: int,
+    seed: int,
+) -> np.ndarray:
+    """Fit PCA on one outer training fold and transform train+validation separately."""
+    from sklearn.decomposition import PCA
+
+    train_mask = np.asarray(train_mask, dtype=bool)
+    validation_mask = np.asarray(validation_mask, dtype=bool)
+    if train_mask.shape != validation_mask.shape or train_mask.shape != (len(raw),):
+        raise ValueError("PCA masks must match the number of rows")
+    if np.any(train_mask & validation_mask) or not np.all(train_mask | validation_mask):
+        raise ValueError("PCA train/validation masks must be disjoint and exhaustive")
+    pca = PCA(n_components=n_components, random_state=seed)
+    transformed = np.empty((len(raw), n_components), dtype=np.float32)
+    transformed[train_mask] = pca.fit_transform(raw[train_mask])
+    transformed[validation_mask] = pca.transform(raw[validation_mask])
+    return transformed
+
+
 def _smoothed_map(df: pd.DataFrame, smoothing: float) -> tuple[pd.Series, float]:
     """Empirical-Bayes smoothed per-LO correctness from ``df``, plus the global rate."""
     global_rate = float(df[LABEL_COL].mean())
@@ -152,6 +175,7 @@ def train(
     include_lo_prior: bool = True,
     lo_smoothing: float = 20.0,
     cv_seed: int | None = None,
+    content_pca_components: int = 48,
 ) -> dict[str, Any]:
     import lightgbm as lgb
 
@@ -181,10 +205,17 @@ def train(
     # exactly what the transcript contributes ON TOP of knowing the topic.
     include_lo_prior = bool(include_lo_prior and LO_COL in frame.columns)
     base_feat_cols = list(feat_cols)
-    if include_lo_prior:
-        feat_cols = [*feat_cols, LO_ENC_COL]
+    content_raw_cols = [c for c in base_feat_cols if c.startswith("cont_raw_")]
+    ordinary_cols = [c for c in base_feat_cols if c not in content_raw_cols]
+    content_k = min(int(content_pca_components), len(content_raw_cols)) if content_raw_cols else 0
+    content_cols = [f"cont_{i:02d}" for i in range(content_k)]
+    model_base_cols = [*ordinary_cols, *content_cols]
+    feat_cols = [*model_base_cols, LO_ENC_COL] if include_lo_prior else list(model_base_cols)
 
-    feature_summary = summarize(frame, base_feat_cols)
+    feature_summary = summarize(frame, ordinary_cols)
+    if content_cols:
+        feature_summary["n_features"] += len(content_cols)
+        feature_summary["features_by_block"]["content"] = len(content_cols)
     if include_lo_prior:
         feature_summary["n_features"] += 1
         by_block = feature_summary["features_by_block"]
@@ -210,8 +241,18 @@ def train(
     for k in pbar(fold_ids, desc="model.gbdt folds", unit="fold"):
         tr = frame["fold"] != k
         va = frame["fold"] == k
+        X = X_base[ordinary_cols].copy()
+        if content_raw_cols:
+            transformed = _fold_safe_pca(
+                X_base[content_raw_cols].to_numpy(dtype=np.float32),
+                tr.to_numpy(),
+                va.to_numpy(),
+                content_k,
+                seed,
+            )
+            for i, col in enumerate(content_cols):
+                X[col] = transformed[:, i]
         if include_lo_prior:
-            X = X_base.copy()
             X[LO_ENC_COL] = _fold_safe_lo_encoding(frame, lo_smoothing, seed, outer_fold=int(k))
             outer_map, outer_global = _smoothed_map(frame.loc[tr], lo_smoothing)
             fold_lo_priors.append(
@@ -221,8 +262,6 @@ def train(
                     "values": {str(key): float(value) for key, value in outer_map.items()},
                 }
             )
-        else:
-            X = X_base
         dtrain = lgb.Dataset(X[tr], label=y[tr.to_numpy()], free_raw_data=False)
         dvalid = lgb.Dataset(X[va], label=y[va.to_numpy()], reference=dtrain, free_raw_data=False)
 

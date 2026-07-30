@@ -29,10 +29,16 @@ BLOCKS: dict[str, tuple[str, str, str, str]] = {
     "linguistic": ("linguistic", "v1", "session_id", "linguistic"),
     "temporal": ("temporal", "v1", "session_id", "temporal"),
     "lo_alignment": ("lo_alignment", "v1_lexical", "response_id", "lo_alignment"),
+    "lo_alignment_embedding": (
+        "lo_alignment",
+        "v1_embedding",
+        "response_id",
+        "lo_alignment",
+    ),
     "feedback": ("feedback", "v1", "response_id", "feedback"),
     "trajectory": ("trajectory", "v1", "response_id", "trajectory"),
     # requires features.window_embeddings (GPU, once)
-    "content": ("content", "v1_k48_top3", "response_id", "content"),
+    "content": ("content", "v2_raw_top3", "response_id", "content"),
 }
 
 
