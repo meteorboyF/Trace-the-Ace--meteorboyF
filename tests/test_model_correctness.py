@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from traceace.calibration import _persist_calibrator
 from traceace.evaluate import align_compatible_oof
@@ -247,6 +248,28 @@ def test_semantic_alignment_has_an_explicit_nonproduction_cache_alias():
     assert BLOCKS["lo_alignment"][1] == "v1_lexical"
     assert BLOCKS["lo_alignment_embedding"][1] == "v1_embedding"
     assert BLOCKS["lo_alignment"][0] == BLOCKS["lo_alignment_embedding"][0]
+
+
+def test_bge_attention_masks_padding_and_emits_one_logit_per_response():
+    torch = pytest.importorskip("torch")
+
+    from traceace.models.bge_attention import WindowAttention
+
+    torch.manual_seed(7)
+    model = WindowAttention.build(dim=8, hidden=6, dropout=0.0, base_rate=0.7)
+    model.eval()
+    windows = torch.randn(2, 4, 8)
+    query = torch.nn.functional.normalize(torch.randn(2, 8), dim=1)
+    positions = torch.rand(2, 4)
+    mask = torch.tensor([[True, True, False, False], [True, True, True, True]])
+    with torch.no_grad():
+        original = model(windows, query, positions, mask)
+        changed = windows.clone()
+        changed[0, 2:] = 1_000_000
+        replay = model(changed, query, positions, mask)
+    assert original.shape == (2,)
+    assert torch.isfinite(original).all()
+    torch.testing.assert_close(original[0], replay[0])
 
 
 def test_move_classifier_holdout_is_session_disjoint():

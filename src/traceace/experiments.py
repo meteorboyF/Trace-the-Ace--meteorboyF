@@ -50,6 +50,8 @@ def repeated_score(
     seeds: tuple[int, ...] | list[int] = DEFAULT_SEEDS,
     num_boost_round: int = 2000,
     early_stopping_rounds: int = 100,
+    include_lo_prior: bool = True,
+    experiment: str = "rep.model",
 ) -> dict[str, Any]:
     """Train the model under several fold assignments and report the spread.
 
@@ -67,12 +69,13 @@ def repeated_score(
         b = _ensure_folds_and_baseline(s, subsample)
         r = _quiet(
             train,
-            experiment="rep.model",
+            experiment=experiment,
             blocks=blocks,
             cv_seed=s,
             subsample=subsample,
             num_boost_round=num_boost_round,
             early_stopping_rounds=early_stopping_rounds,
+            include_lo_prior=include_lo_prior,
         )
         model_ll.append(float(r["logloss"]))
         aucs.append(float(r["auc"]))
@@ -87,6 +90,8 @@ def repeated_score(
     out = {
         "seeds": seeds,
         "blocks": blocks,
+        "include_lo_prior": include_lo_prior,
+        "experiment": experiment,
         "model": res_model.to_dict(),
         "baseline": res_base.to_dict(),
         "delta_vs_lo_only": res_delta.to_dict(),

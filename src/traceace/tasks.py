@@ -50,6 +50,7 @@ _TASK_MODULES = [
     "traceace.cv",
     "traceace.models.baseline",
     "traceace.models.gbdt",
+    "traceace.models.bge_attention",
     "traceace.models.move_classifier",
     "traceace.features.structural",
     "traceace.features.linguistic",

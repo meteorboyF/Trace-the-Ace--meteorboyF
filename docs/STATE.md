@@ -119,16 +119,16 @@ on a single-seed difference below ~1e-3.
   of our own earlier conclusions).
 - **Semantic LO-alignment**: `features.window_embeddings` (BAAI/bge-small-en-v1.5, MIT) and
   `lo_alignment(backend="embedding")` implemented and **validated end-to-end on CPU**.
-- **Submission**: 1.63 MB zip, `main.py` at root, **all 24 verify checks pass** — including
+- **Submission**: 1.63 MB zip, `main.py` at root, **all 26 verify checks pass** — including
   feature-order, the nine output checks (now actually reachable, ADR-018), prediction-sanity
   on training data, the coin-flip line, and `all_expected_checks_ran`. Smoke ~4 s →
   **~0.13 h projected** for the full test set (cap 6 h).
   `prediction_sanity` gates on **AUC 0.8285** (primary) with a deliberately loose log-loss
-  bound, because shrinkage trades training-regime log loss for deployment-regime calibration.
+  bound.
   Value-level parity now compares every deployed feature against the training caches
   (**0 mismatched cells across 180 columns**), and packaged fold models replay **626/626**
   held-out OOF predictions exactly, including fold-specific objective priors.
-- **Quality gates**: ruff clean · mypy clean (46 files) · **74 tests pass** ·
+- **Quality gates**: ruff clean · mypy clean (47 files) · **87 tests pass** ·
   `selftest.all` green in ~25 s · **GitHub Actions CI green**.
   ⚠️ **Treat a green suite as weak evidence.** These same gates were green while **thirteen**
   correctness defects were live, four of which reached a submission, one of which scored
@@ -180,25 +180,33 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
    be validated before spending units — a deliberate relaxation of ADR-005.
 7. Git SHAs in early run manifests read `unknown` (they predate the first commit).
 
+## Leaderboard evidence (supersedes shrinkage simulations)
+- Unshrunk deployable model: **log loss 0.6106 / AUROC 0.6014 / rank 45**.
+- Shrinkage `w=0.55`: **log loss 0.6133 / AUROC 0.6014 / rank 54**. Identical AUROC and
+  worse log loss falsify the deployment-shrinkage hypothesis; retire this candidate.
+- Full grouped CV AUROC (~0.723) materially overstates transfer. Transcript-only grouped CV
+  AUROC is **0.6062**, close to leaderboard AUROC, so objective difficulty is the main
+  validation-to-test domain-shift risk.
+- A deployable transcript-only fallback now trains via
+  `model.gbdt(include_lo_prior=False)`. It is a robustness candidate, not yet a claimed win.
+- `model.bge_attention` is the next GPU experiment: supervised objective-conditioned attention
+  over the already cached 601,459 frozen BGE windows, evaluated with session-disjoint OOF.
+
 ## Next actions, in order
-1. **Submit the shrinkage build** (operator action, 1 slot left this week). It is built and
-   24/24 verified. Expected ≈ −0.007 log loss, which would cross under the constant-prior bar.
-2. **Re-run `interpret.ablation_repeated` and `evaluate.unseen_lo`** — both were measured
-   under target-encoding leakage (ADR-014) and every figure they feed into FINDINGS.md is
-   stale. Cheap, CPU-only, and the write-up depends on these being honest.
-3. **Sweep `w` more finely and by regime.** We tested a coarse grid and took 0.55. Worth
-   asking whether shrinkage should be *conditional* — e.g. stronger for rows whose objective
-   is unseen, since that is precisely where confidence is unearned. This is the highest-value
-   remaining modelling idea, and it costs zero units.
-4. **L4 session — semantic alignment + content block (~3–4 units).** Smoke
-   `run("features.window_embeddings", subsample=500)`, then the full run, then
-   `run("features.lo_alignment", backend="embedding", force=True)`, `run("features.content")`,
-   then re-run the ablation. Lexical matching measurably *hurts*; semantic matching is the fix.
+1. **Run supervised BGE attention on L4.** First the 500-session smoke, then one full
+   five-fold run; sync the OOF and fold weights before disconnecting. Do not package it yet.
+2. **Compare attention against transcript-only OOF on the exact same response cohort** and
+   require a session-clustered interval above zero before investing in inference packaging.
+3. **Add objective/domain stress splits and reliability-gated blending.** The gate may use
+   training-derived reliability only; no leaderboard-targeted tuning.
+4. **Evaluate a long-context cross-encoder (ModernBERT/Qwen class) only if attention proves
+   the semantic path has signal.** This is substantially costlier and requires its own honest
+   grouped validation.
 5. **Move taxonomy**: `annotate.moves` (vLLM backend), then `model.move_classifier`, then
    move-distribution features. ~40 units — hold until step 3 and 4 have landed.
 6. **A100 timing validation (~4 units)** only immediately before a real submission.
-7. Tuning is **not** a next action — a capacity sweep showed the plateau (FINDINGS N6).
-8. **Always** re-run `interpret.ablation_repeated` after adding a block; substitutability
+7. Tuning the existing tree is **not** a next action — a capacity sweep showed the plateau.
+8. **Always** re-run `interpret.ablation_repeated` after adding a deployable block; substitutability
    means every prior ablation is stale.
 
 ## Compute budget

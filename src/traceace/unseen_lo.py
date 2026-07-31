@@ -121,6 +121,7 @@ def stress_test(
     num_boost_round: int = 800,
     seed: int | None = None,
     lo_smoothing: float = 20.0,
+    include_lo_prior: bool = True,
 ) -> dict[str, Any]:
     """Measure performance on genuinely unseen learning objectives.
 
@@ -174,12 +175,13 @@ def stress_test(
 
         p = dict(DEFAULT_PARAMS)
         p.update({"seed": seed + r, "bagging_seed": seed + r, "feature_fraction_seed": seed + r})
-        model_cols = [*feat_cols, LO_ENC_COL]
+        model_cols = [*feat_cols, LO_ENC_COL] if include_lo_prior else list(feat_cols)
         x_train = tr[feat_cols].copy()
         x_valid = va_unseen[feat_cols].copy()
-        x_train[LO_ENC_COL] = _inner_oof_lo_encoding(tr, smoothing=lo_smoothing, seed=seed + r)
         lo_map, global_rate = _smoothed_map(tr, smoothing=lo_smoothing)
-        x_valid[LO_ENC_COL] = va_unseen[LO_COL].map(lo_map).fillna(global_rate).to_numpy()
+        if include_lo_prior:
+            x_train[LO_ENC_COL] = _inner_oof_lo_encoding(tr, smoothing=lo_smoothing, seed=seed + r)
+            x_valid[LO_ENC_COL] = va_unseen[LO_COL].map(lo_map).fillna(global_rate).to_numpy()
         booster = lgb.train(
             p,
             lgb.Dataset(x_train[model_cols], label=tr[LABEL_COL].to_numpy()),
@@ -209,7 +211,7 @@ def stress_test(
         "holdout_frac": holdout_frac,
         "n_repeats": len(model_ll),
         "blocks": blocks,
-        "include_lo_prior": True,
+        "include_lo_prior": include_lo_prior,
         "lo_smoothing": lo_smoothing,
         "num_boost_round": num_boost_round,
         "model_unseen": res_model.to_dict(),
