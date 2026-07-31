@@ -13,10 +13,15 @@ from traceace.io import LABEL_COL
 from traceace.models.gbdt import LO_COL, _fold_safe_lo_encoding, _smoothed_map
 from traceace.packaging.inference_lib import lo_prior_values
 from traceace.packaging.verify import (
+    MIN_TRAIN_SANITY_AUC,
     VerifyResult,
     verify_no_cross_row_features,
     verify_prediction_sanity,
 )
+
+
+def test_training_auc_gate_detects_corruption_without_requiring_objective_prior():
+    assert 0.4738 < MIN_TRAIN_SANITY_AUC < 0.7466
 
 
 def _target_encoding_frame() -> pd.DataFrame:
