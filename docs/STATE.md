@@ -1,8 +1,8 @@
 # STATE.md — read this first
 
-**Last updated:** 2026-07-28 · **CI: green ✅** · all numbers are mean ± SD over 5 fold assignments
+**Last updated:** 2026-07-31 · **CI: green ✅** · all numbers are mean ± SD over 5 fold assignments
 **Competition deadline:** model submissions 2026-08-27 23:59 UTC · write-up 2026-09-15
-**Entry:** solo · **Units remaining: 733.00 / 733** (everything so far ran on CPU, 0 units)
+**Entry:** solo · **Units remaining: 728.97 / 733**
 
 > New session? Read [`../CLAUDE.md`](../CLAUDE.md) → [`BRIEF.md`](BRIEF.md) → this file.
 > Then [`DATA.md`](DATA.md) for measured facts and [`RUNBOOK.md`](RUNBOOK.md) for recipes.
@@ -45,7 +45,7 @@ the evaluation: response-disjoint cross-fitting gives **+0.00546**. The directio
 strong and materially larger than any individual feature block, but the earlier estimate was
 optimistic and must not be quoted as held-out evidence.
 
-✅ **The shrinkage artifact is built and verified: 24 checks, 0 failures.** The bundle carries
+✅ **The shrinkage artifact is built and verified: 26 checks, 0 failures.** The bundle carries
 `{weight: 0.55, base_rate: 0.70247}`, `main.py` applies it after calibration, and smoke
 predictions tightened from std ≈0.16 / range 0.21–0.95 to **std 0.085 / range 0.517–0.826**.
 CV reproduced exactly (0.54228 / AUC 0.7235 / Δ −0.00956), confirming the rebuild changed
@@ -125,6 +125,9 @@ on a single-seed difference below ~1e-3.
   **~0.13 h projected** for the full test set (cap 6 h).
   `prediction_sanity` gates on **AUC 0.8285** (primary) with a deliberately loose log-loss
   bound, because shrinkage trades training-regime log loss for deployment-regime calibration.
+  Value-level parity now compares every deployed feature against the training caches
+  (**0 mismatched cells across 180 columns**), and packaged fold models replay **626/626**
+  held-out OOF predictions exactly, including fold-specific objective priors.
 - **Quality gates**: ruff clean · mypy clean (46 files) · **74 tests pass** ·
   `selftest.all` green in ~25 s · **GitHub Actions CI green**.
   ⚠️ **Treat a green suite as weak evidence.** These same gates were green while **thirteen**
@@ -166,10 +169,11 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
 3. **`main.py` was missing 40% of its features until 2026-07-26** — the feedback, trajectory
    and LO-position blocks were never wired in, arriving as NaN. Fixed, and now impossible to
    repeat: `verify_feature_coverage` fails the build on any gap (ADR-010).
-4. **Semantic LO-alignment + content block are built but not run at scale.**
-   `features.window_embeddings` is validated end-to-end on CPU (40 sessions); full extraction
-   needs an L4, projected **35–52 min ≈ 3–4 units**. `features.content` (pooled top-k window
-   vectors, PCA-48) is validated and waiting on those vectors. Highest-value pending work.
+4. **Semantic BGE extraction is complete but not promoted.** Full L4 extraction encoded
+   601,459 windows for 22,821 sessions in 48 minutes (4.02 units). Honest paired evaluation:
+   content improves `+0.00039 ± 0.00032` (5/5, but below the 0.001 deployment gate), while
+   alignment improves `+0.00016 ± 0.00049` (3/5, interval includes zero). Neither enters the
+   submission.
 5. **`annotate.moves` has only run with the `heuristic` backend.** The vLLM backend is
    written but unexercised.
 6. Local env now has **torch (CPU) + sentence-transformers** installed so GPU code paths can

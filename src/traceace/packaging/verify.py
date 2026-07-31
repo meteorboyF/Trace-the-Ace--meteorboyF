@@ -93,6 +93,8 @@ PREDICTION_CHECKS = (
     "prediction_sanity",
     "prediction_mean_near_base_rate",
     "feature_coverage",
+    "feature_value_parity",
+    "oof_replay_exact",
 )
 
 MAX_ZIP_GB = 55.0
@@ -357,6 +359,145 @@ def verify_feature_coverage(
     )
 
 
+def verify_feature_value_parity(workdir: Path, result: VerifyResult) -> None:
+    """Compare shipped feature VALUES with the cached training design matrix.
+
+    Coverage and column order cannot detect a same-named feature whose arithmetic drifted
+    between training and inference. This check runs the exact archived ``inference_lib``
+    over the private training cohort already staged by ``verify_prediction_sanity`` and
+    compares every deployed non-prior value. Only aggregate mismatch diagnostics leave
+    this function; no transcript or feature values are logged.
+    """
+    import importlib.util
+
+    import joblib
+
+    from ..features.assemble import DEFAULT_BLOCKS, build_matrix
+
+    bundle_path = workdir / "assets" / "model.joblib"
+    feature_path = workdir / "data" / "test_features.csv"
+    lib_path = workdir / "inference_lib.py"
+    if not bundle_path.is_file() or not feature_path.is_file() or not lib_path.is_file():
+        result.add("feature_value_parity", False, "sanity inputs or archived library missing")
+        return
+
+    spec = importlib.util.spec_from_file_location("_traceace_archived_inference", lib_path)
+    if spec is None or spec.loader is None:
+        result.add("feature_value_parity", False, "could not import archived inference library")
+        return
+    ilib = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ilib)
+
+    bundle = joblib.load(bundle_path)
+    vectorizer = bundle.get("lo_vectorizer")
+    deployed = [c for c in bundle["feature_cols"] if c != "lo_prior_enc"]
+    sample = pd.read_csv(feature_path, dtype=str)
+    expected, _ = build_matrix(
+        sample[["response_id", "session_id"]].copy(), blocks=list(DEFAULT_BLOCKS)
+    )
+    expected = expected.set_index("response_id")
+
+    rows: list[dict[str, Any]] = []
+    tdir = workdir / "data" / "test_transcripts"
+    for _, group in sample.groupby("session_id", sort=False):
+        sid = str(group.iloc[0]["session_id"])
+        try:
+            transcript = ilib.normalize_frame(pd.read_csv(tdir / f"{sid}.csv", dtype=str))
+            spans = ilib.windows(transcript)
+            matrix = vectorizer.transform(ilib.window_texts(transcript, spans))
+            session = ilib.all_session_features(transcript)
+            session.update(ilib.feedback_features(transcript, prefix="fbs_"))
+        except Exception as exc:
+            result.add(
+                "feature_value_parity",
+                False,
+                f"archived feature extraction failed ({type(exc).__name__})",
+            )
+            return
+        for _, record in group.iterrows():
+            values = dict(session)
+            lo_text = str(record.get("learning_objective") or "")
+            values.update(
+                ilib.lo_alignment_features(transcript, lo_text, vectorizer, matrix, spans)
+            )
+            keep = ilib.topk_spans(lo_text, vectorizer, matrix, spans)
+            window = ilib.frame_from_spans(transcript, keep)
+            values.update(ilib.feedback_features(window, prefix="fb_"))
+            values.update(ilib.trajectory_features(window))
+            values.update(
+                ilib.lo_position_features(
+                    keep,
+                    [keep],
+                    len(transcript),
+                    transcript["t_seconds"].to_numpy(dtype=float),
+                )
+            )
+            values["response_id"] = str(record["response_id"])
+            rows.append(values)
+
+    actual = pd.DataFrame(rows).set_index("response_id")
+    missing = sorted(set(deployed) - set(actual.columns))
+    if missing:
+        result.add(
+            "feature_value_parity",
+            False,
+            f"archived inference omitted {len(missing)} deployed feature columns",
+        )
+        return
+    ids = sample["response_id"].astype(str).tolist()
+    actual_values = actual.loc[ids, deployed].to_numpy(dtype=float)
+    expected_values = expected.loc[ids, deployed].to_numpy(dtype=float)
+    equal = np.isclose(actual_values, expected_values, rtol=1e-9, atol=1e-9, equal_nan=True)
+    finite_delta = np.abs(actual_values - expected_values)
+    finite_delta = finite_delta[np.isfinite(finite_delta)]
+    max_delta = float(finite_delta.max()) if finite_delta.size else 0.0
+    bad_cells = int((~equal).sum())
+    bad_cols = int((~equal).any(axis=0).sum())
+    result.add(
+        "feature_value_parity",
+        bad_cells == 0,
+        f"{bad_cells} mismatched cells across {bad_cols}/{len(deployed)} columns; "
+        f"max_abs_delta={max_delta:.3g}",
+    )
+    if bad_cells:
+        result.add("oof_replay_exact", False, "feature parity failed; replay is invalid")
+        return
+
+    from ..cv import load_folds
+    from ..evaluate import load_oof
+
+    experiment = str(bundle.get("experiment", "model.gbdt"))
+    try:
+        folds = load_folds().set_index("response_id")
+        oof = load_oof(experiment).set_index("response_id")
+        boosters = list(bundle["boosters"])
+        prior_specs = list(bundle.get("lo_prior_by_booster", []))
+        full_cols = list(bundle["feature_cols"])
+        replay = pd.Series(index=ids, dtype=float)
+        sample_by_id = sample.set_index("response_id")
+        for fold, booster in enumerate(boosters):
+            fold_ids = [rid for rid in ids if int(folds.loc[rid, "fold"]) == fold]
+            if not fold_ids:
+                continue
+            matrix = actual.loc[fold_ids, deployed].copy()
+            if "lo_prior_enc" in full_cols:
+                lo_ids = sample_by_id.loc[fold_ids, "learning_objective_id"].to_numpy()
+                matrix["lo_prior_enc"] = ilib.lo_prior_values(lo_ids, prior_specs[fold])
+            replay.loc[fold_ids] = np.asarray(booster.predict(matrix[full_cols]), dtype=float)
+        expected_oof = oof.loc[ids, "pred"].to_numpy(dtype=float)
+        replayed = replay.loc[ids].to_numpy(dtype=float)
+        replay_delta = np.abs(replayed - expected_oof)
+        replay_max = float(np.nanmax(replay_delta))
+        replay_bad = int((~np.isclose(replayed, expected_oof, rtol=1e-12, atol=1e-12)).sum())
+        result.add(
+            "oof_replay_exact",
+            replay_bad == 0,
+            f"{replay_bad}/{len(ids)} held-out predictions differ; max_abs_delta={replay_max:.3g}",
+        )
+    except Exception:
+        result.add("oof_replay_exact", False, "could not replay packaged held-out predictions")
+
+
 def verify_sklearn_version(workdir: Path, result: VerifyResult) -> None:
     """Assert the bundle was built with the container's scikit-learn version.
 
@@ -473,6 +614,7 @@ def verify_prediction_sanity(
     import shutil
     import subprocess
     import sys
+    import tempfile
     import zipfile
 
     from ..evaluate import auc as _auc
@@ -486,8 +628,7 @@ def verify_prediction_sanity(
         result.add("prediction_sanity", False, f"{zpath.name} missing")
         return None
 
-    work = sdir / "_sanity"
-    shutil.rmtree(work, ignore_errors=True)
+    work = Path(tempfile.mkdtemp(prefix="_sanity_", dir=sdir))
     (work / "data" / "test_transcripts").mkdir(parents=True)
     with zipfile.ZipFile(zpath) as zf:
         zf.extractall(work)
@@ -708,6 +849,10 @@ def verify(
         runtime_dir = verify_prediction_sanity(result, zip_path=zip_path)
         if runtime_dir is not None:
             verify_feature_coverage(runtime_dir, result)
+            verify_feature_value_parity(runtime_dir, result)
+            import shutil
+
+            shutil.rmtree(runtime_dir, ignore_errors=True)
 
     # Did every check we rely on actually RUN? "0 failures" is not the same as "all checks
     # ran" — for weeks the nine output checks silently never executed because the CSV path
