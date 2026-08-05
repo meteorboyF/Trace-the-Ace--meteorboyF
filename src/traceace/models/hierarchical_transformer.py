@@ -297,7 +297,9 @@ def train(
     fold_ids = [fold] if fold is not None else list(range(5))
     all_oof: list[pd.DataFrame] = []
     fold_metrics: list[dict[str, Any]] = []
-    out_dir = experiment_dir(experiment)
+    # A smoke checkpoint must never share a directory or OOF key with full training. This
+    # invariant previously prevented a subsampled tree model from silently shipping.
+    out_dir = experiment_dir(experiment, subsample=subsample)
     out_dir.mkdir(parents=True, exist_ok=True)
     for fold_id in fold_ids:
         assert fold_id is not None
@@ -419,7 +421,7 @@ def train(
         del model, optimizer, best_state
         torch.cuda.empty_cache()
     oof = pd.concat(all_oof, ignore_index=True)
-    save_oof(f"{experiment}.{split_mode}", oof)
+    save_oof(f"{experiment}.{split_mode}", oof, subsample=subsample)
     if len(oof) == len(frame):
         result = score_frame(oof, f"{experiment}.{split_mode}")
     else:
