@@ -189,19 +189,19 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
   validation-to-test domain-shift risk.
 - A deployable transcript-only fallback now trains via
   `model.gbdt(include_lo_prior=False)`. It is a robustness candidate, not yet a claimed win.
-- `model.bge_attention` is the next GPU experiment: supervised objective-conditioned attention
-  over the already cached 601,459 frozen BGE windows, evaluated with session-disjoint OOF.
+- `model.bge_attention` completed: **0.54467 log loss / 0.7205 AUROC**, but it was **0.00717
+  worse than objective-only**. The familiar high session-CV AUROC shows that semantic queries
+  reconstructed objective difficulty; this route is rejected for deployment.
 
 ## Next actions, in order
-1. **Run supervised BGE attention on L4.** First the 500-session smoke, then one full
-   five-fold run; sync the OOF and fold weights before disconnecting. Do not package it yet.
-2. **Compare attention against transcript-only OOF on the exact same response cohort** and
-   require a session-clustered interval above zero before investing in inference packaging.
-3. **Add objective/domain stress splits and reliability-gated blending.** The gate may use
-   training-derived reliability only; no leaderboard-targeted tuning.
-4. **Evaluate a long-context cross-encoder (ModernBERT/Qwen class) only if attention proves
-   the semantic path has signal.** This is substantially costlier and requires its own honest
-   grouped validation.
+1. **Build robust folds.** `cv.robust_build` now provides purged objective-disjoint and
+   transcript-domain holdouts; these supersede ordinary grouped CV as promotion gates.
+2. **A100 ModernBERT ladder.** Smoke 500 sessions for one epoch, then train only objective
+   fold 0 on full data. Do not run five folds until that held-out regime improves.
+3. **Domain confirmation.** Repeat one fold using transcript-domain holdout. A gain confined
+   to ordinary/session CV is rejected as another shortcut.
+4. **Only after both gates pass**, run five folds, repeated seeds, inference packaging, and
+   A100 container timing. See [`TRANSFORMER_PLAN.md`](TRANSFORMER_PLAN.md).
 5. **Move taxonomy**: `annotate.moves` (vLLM backend), then `model.move_classifier`, then
    move-distribution features. ~40 units — hold until step 3 and 4 have landed.
 6. **A100 timing validation (~4 units)** only immediately before a real submission.
@@ -210,7 +210,7 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
    means every prior ablation is stale.
 
 ## Compute budget
-733 units, **0.00 spent**. Plan (ADR-008): ~0 CPU ladder · ~5 embeddings · ~40 LLM
+733 units, **4.69 spent** at the last synced run. Plan (ADR-008): ~0 CPU ladder · ~5 embeddings · ~40 LLM
 annotation · ~30 classifier iteration · ~15 A100 timing. **~600 held in reserve until
 week 3.** Flag anything projected above 25 units for a single task.
 
