@@ -37,7 +37,7 @@ zstandard>=0.22        # dev-only: tar.zst rollups for Drive
 
 # --- embeddings (frozen extraction on L4; runtime ships these) ---
 sentence-transformers>=3.0
-transformers>=4.44
+transformers>=4.48,<6     # ModernBERT entered stable Transformers in the 4.48 series
 tokenizers>=0.19
 tiktoken>=0.7          # exact token counting for eda.inference_budget
 

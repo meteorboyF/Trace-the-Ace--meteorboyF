@@ -21,11 +21,13 @@ there.
 
 `model.hierarchical_transformer` fine-tunes `answerdotai/ModernBERT-base` (Apache-2.0):
 
-- role-tagged transcript chunks, retaining the final eight 512-token chunks by default;
+- role-tagged transcript chunks, sampling eight 512-token chunks uniformly across the full
+  lesson by default (four in the L4 engineering smoke);
 - shared encoder for transcript chunks and learning-objective text;
 - transcript-only attention/head plus an objective-conditioned attention/head;
 - 50% objective dropout and an auxiliary transcript-only loss;
-- bf16 on A100, gradient checkpointing, accumulation, clipping, and early stopping.
+- bf16 where supported (including L4/A100), SDPA, gradient checkpointing, accumulation,
+  clipping, and early stopping.
 
 Objective IDs are never model inputs. The initial prediction is an equal blend of the two
 heads; this is fixed before leaderboard feedback.
@@ -33,11 +35,12 @@ heads; this is fixed before leaderboard feedback.
 ## Compute ladder
 
 1. CPU: build normal features, then both robust fold tables.
-2. A100 smoke: 500 sessions, objective fold 0, one epoch.
-3. A100 one-fold run: full data, objective fold 0. Stop unless it improves the transcript-only
+2. L4 smoke: 500 sessions, four uniformly spaced chunks, batch size 1, objective fold 0,
+   one epoch. This tests the complete training/checkpoint path within 24 GB VRAM.
+3. L4/A100 one-fold run: full data, objective fold 0. Stop unless it improves the transcript-only
    baseline on the same held-out rows.
 4. Repeat fold 0 using `split_mode="domain"`. Stop if the gain disappears.
-5. Only then run all five folds. Package inference only after both robust regimes pass.
+5. Only then run all five folds (prefer A100). Package inference only after both robust regimes pass.
 
 Example one-fold command:
 

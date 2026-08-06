@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from traceace.io import LABEL_COL
@@ -66,7 +67,9 @@ def test_hierarchical_transformer_dual_heads_mask_padding(monkeypatch):
         intermediate_size=24,
     )
     monkeypatch.setattr(
-        transformers.AutoModel, "from_pretrained", lambda _: transformers.BertModel(config)
+        transformers.AutoModel,
+        "from_pretrained",
+        lambda _, **kwargs: transformers.BertModel(config),
     )
     model = HierarchicalEncoder.build("local-test", dropout=0.0, gradient_checkpointing=False)
     chunks = torch.randint(0, 32, (2, 3, 8))
@@ -79,3 +82,46 @@ def test_hierarchical_transformer_dual_heads_mask_padding(monkeypatch):
         plain, conditional = model(chunks, masks, valid, objectives, objective_mask)
     assert plain.shape == conditional.shape == (2,)
     assert torch.isfinite(plain).all() and torch.isfinite(conditional).all()
+
+
+def test_transformer_collator_covers_whole_lesson_with_compact_token_cache():
+    torch = __import__("pytest").importorskip("torch")
+    from traceace.models.hierarchical_transformer import _Collator
+
+    class Tokenizer:
+        pad_token_id = 0
+
+        @staticmethod
+        def encode(text, add_special_tokens=False):
+            return list(range(40))
+
+        @staticmethod
+        def build_inputs_with_special_tokens(tokens):
+            return [98, *tokens, 99]
+
+        @staticmethod
+        def __call__(texts, **kwargs):
+            return {
+                "input_ids": torch.ones((len(texts), 3), dtype=torch.long),
+                "attention_mask": torch.ones((len(texts), 3), dtype=torch.long),
+            }
+
+    collator = _Collator(Tokenizer(), chunk_tokens=10, max_chunks=3, objective_tokens=8)
+    ids, _, valid, *_ = collator(
+        [{"text": "lesson", "objective": "obj", "label": 1.0, "response_id": "r1"}]
+    )
+    assert ids[0, :, 1].tolist() == [0, 16, 32]
+    assert valid.tolist() == [[True, True, True]]
+    assert collator.cache["lesson"].dtype == np.int32
+
+
+def test_checkpoint_state_preserves_integer_buffers_and_halves_floats():
+    torch = __import__("pytest").importorskip("torch")
+    from traceace.models.hierarchical_transformer import _checkpoint_state
+
+    module = torch.nn.Linear(3, 2)
+    module.register_buffer("indices", torch.tensor([0, 4097], dtype=torch.long))
+    state = _checkpoint_state(module)
+    assert state["weight"].dtype == torch.float16
+    assert state["indices"].dtype == torch.long
+    assert state["indices"].tolist() == [0, 4097]

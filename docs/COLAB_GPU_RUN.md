@@ -1,110 +1,85 @@
-# First Colab GPU run — operator checklist
+# L4 transformer smoke — operator checklist
 
-This run is an evidence-gathering run. The current verified submission remains the safe
-fallback. Semantic/content features are **not deployable** until `main.py` gains an offline
-encoder implementation and train/serve parity tests; packaging now refuses them explicitly.
+This is an engineering smoke, not a submission build and not evidence of leaderboard quality.
+The verified transcript-only ZIP remains untouched. Do not upload private competition data to
+GitHub or any API.
 
-## 1. Put the private inputs on Drive
+## 1. CPU preparation
 
-Create this private Drive layout:
-
-```text
-MyDrive/
-└── trace-the-ace/
-    └── data/
-        └── raw.zip
-```
-
-`raw.zip` must contain the canonical inputs below, either directly or under one enclosing
-folder that `data.ingest` can normalize:
-
-```text
-train_features.csv
-train_labels.csv
-submission_format.csv
-submission_format_smoke.csv
-train_transcripts.zip
-```
-
-Do not put any competition data in GitHub. Confirm the Drive file finishes uploading before
-starting a paid runtime.
-
-## 2. Before attaching a GPU
-
-1. Push the reviewed code and notebook to `main`.
-2. Open `notebooks/Trace_the_Ace_Runner.ipynb` from GitHub in Colab.
-3. Start on **CPU + High RAM**.
-4. Run setup, staging/restore, feature, model, and self-test cells through the CPU pipeline.
-5. Confirm every cell is green. A task exception now stops the cell; do not continue after one.
-
-## 3. L4 smoke gate
-
-Switch to an **L4**, leave `RUN_FULL_GPU = False`, and run only the semantic GPU cell:
-
-```python
-run("features.window_embeddings", subsample=500)
-```
-
-Leave `RUN_EXPERIMENTAL_GPU = False`; the unrelated ModernBERT and vLLM research jobs are
-not part of this path. Proceed only if the BGE smoke completes, its cache path is printed,
-no OOM occurs, and the budget report
-shows the expected L4 rate.
-
-## 4. Full semantic extraction
-
-Set:
-
-```python
-RUN_FULL_GPU = True
-```
-
-Run the semantic GPU cell. It performs the full window extraction, synchronizes
-`data/features/` and `data/interim/` to Drive, and disconnects the paid runtime.
-
-Do not interrupt the synchronization step. The expected Drive outputs are:
-
-```text
-MyDrive/trace-the-ace/cache/features.tar
-MyDrive/trace-the-ace/cache/interim.tar
-MyDrive/trace-the-ace/artifacts/rollup.tar
-MyDrive/trace-the-ace/runs/runs.tar
-```
-
-## 5. CPU evaluation after reconnect
-
-Reconnect to **CPU + High RAM**, run setup and:
+Open the runner from GitHub on **CPU + High RAM**, run the setup cell, and confirm the printed
+commit matches the latest reviewed SHA. Then run:
 
 ```python
 run("maintenance.restore_artifacts")
-run("features.lo_alignment", backend="embedding")
-run("features.content")
-run("evaluate.semantic_repeated")
+run("data.ingest")
+run("data.consolidate")
+run("cv.build")
+run("cv.robust_build", kind="objective")
+run("cv.robust_build", kind="domain")
 run("maintenance.sync_artifacts")
 ```
 
-Interpretation gates:
+The objective folds must report five validation cohorts of roughly 7K responses each. The
+domain folds require the cached structural, linguistic, and temporal feature blocks. If those
+are missing, build those three blocks on CPU and rerun the domain task.
 
-- Do not use single-seed scores.
-- Require a paired repeated-seed gain of at least 0.001 whose interval excludes zero and
-  whose sign agrees across all seeds.
-- Content PCA is fitted independently inside every outer CV training fold.
-- Production keeps the explicit lexical alignment cache; BGE alignment has a separate
-  research cache identity and cannot silently replace it.
-- Do not call `submission.build` on an experiment containing `cont_`, `emb_`, or `move_`;
-  the build now refuses these research-only feature families.
+## 2. L4 settings
 
-## 6. What to report back
+Start a fresh **NVIDIA L4** runtime and edit only these setup flags:
 
-Copy only aggregate task output—never transcript or learning-objective text:
+```python
+RUN_FULL_GPU = False
+RUN_EXPERIMENTAL_GPU = False
+RUN_ATTENTION_GPU = False
+RUN_TRANSFORMER_GPU = True
+RUN_TRANSFORMER_ALL_FOLDS = False
+```
 
-- `features.window_embeddings`: wall time, window count, dimensions, cache paths.
-- `features.lo_alignment`: response count and feature count.
-- `evaluate.semantic_repeated`: paired mean ± SD and 95% interval for both BGE variants.
-- `budget.report`: units spent and remaining.
-- Any traceback, with paths/IDs redacted if necessary.
+Run setup and confirm `accel: NVIDIA L4`. Restore artifacts and stage raw data; CPU-tagged
+staging calls on an attached L4 require `allow_waste=True`:
 
-At that point decide between:
+```python
+run("maintenance.restore_artifacts", allow_waste=True)
+run("data.ingest", allow_waste=True)
+run("data.consolidate", allow_waste=True)
+```
 
-1. Submit the verified CPU + cross-fitted-shrinkage ZIP.
-2. Spend development time implementing offline encoder inference only if semantic features
-   show a real repeated-seed gain large enough to justify the added runtime risk.
+## 3. Run only the transformer GPU cell
+
+Run the cell containing `model.hierarchical_transformer`. The notebook invokes:
+
+```python
+run(
+    "model.hierarchical_transformer",
+    subsample=500,
+    split_mode="objective",
+    fold=0,
+    epochs=1,
+    batch_size=1,
+    accumulation_steps=16,
+    max_chunks=4,
+)
+```
+
+This configuration samples four chunks uniformly across each lesson and is deliberately
+conservative for 24 GB VRAM. It downloads the official ModernBERT checkpoint, performs one
+training epoch, evaluates the transcript/conditional/blended heads, saves a half-precision
+checkpoint without casting integer buffers, syncs artifacts, and disconnects.
+
+Do not set `RUN_TRANSFORMER_ALL_FOLDS=True`. Do not run BGE, vLLM, submission, or A100 timing
+cells in this session.
+
+## 4. Report back
+
+Return only aggregate output:
+
+- exact synced commit;
+- train and validation row counts;
+- blended log loss/AUROC and `gain_vs_train_rate`;
+- all three head metrics;
+- `peak_gpu_gb`, wall time, and units;
+- artifact-sync confirmation or the complete traceback.
+
+The smoke passes engineering only if the checkpoint and OOF artifacts sync successfully and
+peak memory leaves reasonable L4 headroom. A full-data fold requires a separate explicit
+decision after reviewing these results.

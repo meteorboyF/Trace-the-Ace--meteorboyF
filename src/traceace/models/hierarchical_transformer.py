@@ -26,6 +26,7 @@ from ..tasks import task
 log = get_logger("model.hierarchical_transformer")
 
 DEFAULT_MODEL = "answerdotai/ModernBERT-base"
+ROLE_TOKENS = ["<student>", "<tutor>", "<background>", "<unknown>"]
 
 
 def render_transcript(frame: pd.DataFrame) -> str:
@@ -38,14 +39,24 @@ class HierarchicalEncoder:
     """Optional-torch factory used by training and lightweight unit tests."""
 
     @staticmethod
-    def build(model_name: str, dropout: float = 0.15, gradient_checkpointing: bool = True):
+    def build(
+        model_name: str,
+        dropout: float = 0.15,
+        gradient_checkpointing: bool = True,
+        vocab_size: int | None = None,
+        base_rate: float | None = None,
+    ):
         import torch
         from transformers import AutoModel
 
         class _Model(torch.nn.Module):
             def __init__(self):
                 super().__init__()
-                self.encoder = AutoModel.from_pretrained(model_name)
+                # SDPA is available in stock PyTorch on L4 and avoids making the smoke depend
+                # on an optional flash-attn wheel. PyTorch may still select fused kernels.
+                self.encoder = AutoModel.from_pretrained(model_name, attn_implementation="sdpa")
+                if vocab_size is not None:
+                    self.encoder.resize_token_embeddings(vocab_size)
                 if gradient_checkpointing and hasattr(
                     self.encoder, "gradient_checkpointing_enable"
                 ):
@@ -53,18 +64,25 @@ class HierarchicalEncoder:
                 hidden = int(self.encoder.config.hidden_size)
                 self.transcript_score = torch.nn.Linear(hidden, 1)
                 self.objective_score = torch.nn.Linear(hidden, hidden, bias=False)
+                transcript_output = torch.nn.Linear(hidden, 1)
                 self.transcript_head = torch.nn.Sequential(
                     torch.nn.LayerNorm(hidden),
                     torch.nn.Dropout(dropout),
-                    torch.nn.Linear(hidden, 1),
+                    transcript_output,
                 )
+                conditional_output = torch.nn.Linear(hidden, 1)
                 self.conditional_head = torch.nn.Sequential(
                     torch.nn.LayerNorm(3 * hidden),
                     torch.nn.Linear(3 * hidden, hidden),
                     torch.nn.GELU(),
                     torch.nn.Dropout(dropout),
-                    torch.nn.Linear(hidden, 1),
+                    conditional_output,
                 )
+                if base_rate is not None:
+                    bias = float(np.log(base_rate / max(1.0 - base_rate, 1e-6)))
+                    for output in (transcript_output, conditional_output):
+                        if output.bias is not None:
+                            torch.nn.init.constant_(output.bias, bias)
 
             def _encode(self, ids, mask):
                 return self.encoder(input_ids=ids, attention_mask=mask).last_hidden_state[:, 0]
@@ -130,11 +148,15 @@ class _Collator:
         self.chunk_tokens = chunk_tokens
         self.max_chunks = max_chunks
         self.objective_tokens = objective_tokens
-        self.cache: dict[str, list[int]] = {}
+        # NumPy int32 uses ~4 bytes/token. A Python list of ints uses roughly 7x more and
+        # grows into several GB over 22K long sessions.
+        self.cache: dict[str, np.ndarray] = {}
 
-    def _tokens(self, text: str) -> list[int]:
+    def _tokens(self, text: str) -> np.ndarray:
         if text not in self.cache:
-            self.cache[text] = self.tokenizer.encode(text, add_special_tokens=False)
+            self.cache[text] = np.asarray(
+                self.tokenizer.encode(text, add_special_tokens=False), dtype=np.int32
+            )
         return self.cache[text]
 
     def __call__(self, batch):
@@ -145,10 +167,16 @@ class _Collator:
             tokens = self._tokens(item["text"])
             payload = max(8, self.chunk_tokens - 2)
             chunks = [tokens[i : i + payload] for i in range(0, len(tokens), payload)]
-            chunks = chunks[-self.max_chunks :] or [[]]
+            if len(chunks) > self.max_chunks:
+                # Cover the whole lesson rather than silently retaining only its ending.
+                indices = np.linspace(0, len(chunks) - 1, self.max_chunks).round().astype(int)
+                chunks = [chunks[index] for index in indices]
+            chunks = chunks or [np.asarray([], dtype=np.int32)]
             encoded.append(
                 [
-                    self.tokenizer.build_inputs_with_special_tokens(chunk)[: self.chunk_tokens]
+                    self.tokenizer.build_inputs_with_special_tokens(chunk.tolist())[
+                        : self.chunk_tokens
+                    ]
                     for chunk in chunks
                 ]
             )
@@ -157,8 +185,8 @@ class _Collator:
         ids = torch.full((len(batch), max_c, self.chunk_tokens), pad, dtype=torch.long)
         mask = torch.zeros_like(ids)
         valid = torch.zeros((len(batch), max_c), dtype=torch.bool)
-        for i, chunks in enumerate(encoded):
-            for j, chunk in enumerate(chunks):
+        for i, encoded_chunks in enumerate(encoded):
+            for j, chunk in enumerate(encoded_chunks):
                 n = len(chunk)
                 ids[i, j, :n] = torch.tensor(chunk)
                 mask[i, j, :n] = 1
@@ -187,6 +215,18 @@ def _load_texts(session_ids: list[str]) -> dict[str, str]:
     return {
         sid: render_transcript(read_transcript(sid))
         for sid in pbar(session_ids, desc="load transformer transcripts", unit="session")
+    }
+
+
+def _checkpoint_state(model) -> dict[str, Any]:
+    """Move state to CPU and halve floats without corrupting integer model buffers."""
+    import torch
+
+    return {
+        key: value.detach()
+        .to("cpu", dtype=torch.float16 if value.is_floating_point() else value.dtype)
+        .clone()
+        for key, value in model.state_dict().items()
     }
 
 
@@ -261,8 +301,8 @@ def train(
     chunk_tokens: int = 512,
     max_chunks: int = 8,
     objective_tokens: int = 96,
-    batch_size: int = 2,
-    accumulation_steps: int = 16,
+    batch_size: int = 1,
+    accumulation_steps: int = 32,
     epochs: int = 4,
     patience: int = 2,
     learning_rate: float = 2e-5,
@@ -279,6 +319,12 @@ def train(
 
     if not torch.cuda.is_available():
         raise RuntimeError("hierarchical transformer training requires a CUDA runtime")
+    if chunk_tokens < 32 or max_chunks < 1 or objective_tokens < 8:
+        raise ValueError("chunk_tokens>=32, max_chunks>=1, and objective_tokens>=8 are required")
+    if batch_size < 1 or accumulation_steps < 1 or epochs < 1:
+        raise ValueError("batch_size, accumulation_steps, and epochs must be positive")
+    if not 0 <= objective_dropout <= 1 or not 0 <= inference_blend <= 1:
+        raise ValueError("objective_dropout and inference_blend must lie in [0, 1]")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -288,12 +334,11 @@ def train(
     metadata = load_train_features()
     labels = load_folds()[["response_id", LABEL_COL]]
     frame = metadata.merge(labels, on="response_id", how="inner")
+    if len(frame) != len(metadata) or frame[LABEL_COL].isna().any():
+        raise RuntimeError("training metadata and persisted labels/folds are not one-to-one")
     if subsample is not None:
         sessions = frame["session_id"].drop_duplicates().head(subsample)
         frame = frame[frame["session_id"].isin(sessions)].copy()
-    texts = _load_texts(frame["session_id"].astype(str).drop_duplicates().tolist())
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    collator = _Collator(tokenizer, chunk_tokens, max_chunks, objective_tokens)
     fold_ids = [fold] if fold is not None else list(range(5))
     all_oof: list[pd.DataFrame] = []
     fold_metrics: list[dict[str, Any]] = []
@@ -301,9 +346,54 @@ def train(
     # invariant previously prevented a subsampled tree model from silently shipping.
     out_dir = experiment_dir(experiment, subsample=subsample)
     out_dir.mkdir(parents=True, exist_ok=True)
+    run_tag = "all" if fold is None else f"fold{fold}"
+    manifest_path = out_dir / f"{split_mode}_{run_tag}_training_manifest.json"
+    run_config = {
+        "experiment": experiment,
+        "model_name": model_name,
+        "split_mode": split_mode,
+        "folds": fold_ids,
+        "subsample": subsample,
+        "chunk_tokens": chunk_tokens,
+        "max_chunks": max_chunks,
+        "objective_tokens": objective_tokens,
+        "batch_size": batch_size,
+        "accumulation_steps": accumulation_steps,
+        "epochs": epochs,
+        "patience": patience,
+        "learning_rate": learning_rate,
+        "head_learning_rate": head_learning_rate,
+        "weight_decay": weight_decay,
+        "objective_dropout": objective_dropout,
+        "auxiliary_weight": auxiliary_weight,
+        "inference_blend": inference_blend,
+        "seed": seed,
+    }
+    if manifest_path.is_file() and not force:
+        cached = json.loads(manifest_path.read_text())
+        if cached.get("run_config") == run_config and "result" in cached:
+            log.warning("CACHE HIT for completed transformer run %s", manifest_path.name)
+            return {**cached["result"], "cached": True, "output_path": str(out_dir)}
+        raise RuntimeError(
+            f"{manifest_path.name} exists with different hyperparameters; use a new "
+            "experiment name or pass force=True explicitly"
+        )
+
+    texts = _load_texts(frame["session_id"].astype(str).drop_duplicates().tolist())
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.add_special_tokens({"additional_special_tokens": ROLE_TOKENS})
+    collator = _Collator(tokenizer, chunk_tokens, max_chunks, objective_tokens)
     for fold_id in fold_ids:
         assert fold_id is not None
         train_frame, valid_frame = _split_frames(frame, split_mode, int(fold_id))
+        if train_frame.empty or valid_frame.empty:
+            raise RuntimeError(f"{split_mode} fold {fold_id} has an empty train/validation side")
+        if not set(train_frame["session_id"]).isdisjoint(valid_frame["session_id"]):
+            raise RuntimeError(f"{split_mode} fold {fold_id} leaks sessions")
+        if split_mode == "objective" and not set(train_frame["learning_objective_id"]).isdisjoint(
+            valid_frame["learning_objective_id"]
+        ):
+            raise RuntimeError(f"objective fold {fold_id} leaks objectives")
         train_loader: Any = DataLoader(
             _TranscriptDataset(train_frame, texts),  # type: ignore[arg-type]
             batch_size=batch_size,
@@ -318,7 +408,12 @@ def train(
             collate_fn=collator,
             num_workers=0,
         )
-        model = HierarchicalEncoder.build(model_name).to(device)
+        model = HierarchicalEncoder.build(
+            model_name,
+            vocab_size=len(tokenizer),
+            base_rate=float(train_frame[LABEL_COL].mean()),
+        ).to(device)
+        torch.cuda.reset_peak_memory_stats(device)
         encoder_params: list[Any] = []
         head_params: list[Any] = []
         for name, parameter in model.named_parameters():
@@ -345,10 +440,14 @@ def train(
                         obj_mask.to(device),
                         objective_dropout,
                     )
+                    group_remaining = (
+                        len(train_loader) - ((step - 1) // accumulation_steps) * accumulation_steps
+                    )
+                    loss_divisor = min(accumulation_steps, group_remaining)
                     loss = (
                         criterion(conditional, y.to(device))
                         + auxiliary_weight * criterion(plain, y.to(device))
-                    ) / accumulation_steps
+                    ) / loss_divisor
                 loss.backward()
                 if step % accumulation_steps == 0 or step == len(train_loader):
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -367,10 +466,7 @@ def train(
             )
             if val_loss < best_loss - 1e-4:
                 best_loss, best_epoch, stale = val_loss, epoch, 0
-                best_state = {
-                    k: v.detach().to("cpu", dtype=torch.float16).clone()
-                    for k, v in model.state_dict().items()
-                }
+                best_state = _checkpoint_state(model)
             else:
                 stale += 1
                 if stale >= patience:
@@ -389,6 +485,7 @@ def train(
                     "pred": pv,
                     "pred_transcript": plain_pv,
                     "pred_conditional": conditional_pv,
+                    "pred_constant": float(train_frame[LABEL_COL].mean()),
                     "session_id": valid_frame.set_index("response_id")
                     .loc[ids, "session_id"]
                     .to_numpy(),
@@ -406,6 +503,8 @@ def train(
                 "max_chunks": max_chunks,
                 "objective_tokens": objective_tokens,
                 "inference_blend": inference_blend,
+                "role_tokens": ROLE_TOKENS,
+                "vocab_size": len(tokenizer),
             },
             checkpoint,
         )
@@ -416,13 +515,17 @@ def train(
                 "best_epoch": best_epoch,
                 "n_train": len(train_frame),
                 "n_valid": len(valid_frame),
+                "baseline_logloss": logloss(
+                    yv, np.full(len(yv), float(train_frame[LABEL_COL].mean()))
+                ),
+                "peak_gpu_gb": round(torch.cuda.max_memory_allocated(device) / 1e9, 3),
             }
         )
         del model, optimizer, best_state
         torch.cuda.empty_cache()
     oof = pd.concat(all_oof, ignore_index=True)
     save_oof(f"{experiment}.{split_mode}", oof, subsample=subsample)
-    if len(oof) == len(frame):
+    if split_mode == "session" and len(oof) == len(frame):
         result = score_frame(oof, f"{experiment}.{split_mode}")
     else:
         # A staged one-fold run is intentionally not a complete OOF cohort, so comparing it
@@ -444,6 +547,10 @@ def train(
 
     y_all = oof[LABEL_COL].to_numpy(dtype=float)
     result["head_metrics"] = {
+        "constant": {
+            "logloss": logloss(y_all, oof["pred_constant"].to_numpy(dtype=float)),
+            "auc": auc(y_all, oof["pred_constant"].to_numpy(dtype=float)),
+        },
         "transcript": {
             "logloss": logloss(y_all, oof["pred_transcript"].to_numpy(dtype=float)),
             "auc": auc(y_all, oof["pred_transcript"].to_numpy(dtype=float)),
@@ -454,18 +561,7 @@ def train(
         },
         "blend": {"logloss": result["logloss"], "auc": result["auc"]},
     }
-    manifest = {
-        "experiment": experiment,
-        "model_name": model_name,
-        "split_mode": split_mode,
-        "folds": fold_ids,
-        "objective_dropout": objective_dropout,
-        "auxiliary_weight": auxiliary_weight,
-        "inference_blend": inference_blend,
-        "fold_metrics": fold_metrics,
-        "result": result,
-    }
-    (out_dir / f"{split_mode}_training_manifest.json").write_text(json.dumps(manifest, indent=2))
+    result["gain_vs_train_rate"] = result["head_metrics"]["constant"]["logloss"] - result["logloss"]
     result.update(
         {
             "output_path": str(out_dir),
@@ -474,4 +570,10 @@ def train(
             "model_name": model_name,
         }
     )
+    manifest = {
+        "run_config": run_config,
+        "fold_metrics": fold_metrics,
+        "result": result,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2))
     return result

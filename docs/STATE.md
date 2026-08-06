@@ -128,7 +128,7 @@ on a single-seed difference below ~1e-3.
   Value-level parity now compares every deployed feature against the training caches
   (**0 mismatched cells across 180 columns**), and packaged fold models replay **626/626**
   held-out OOF predictions exactly, including fold-specific objective priors.
-- **Quality gates**: ruff clean · mypy clean (47 files) · **87 tests pass** ·
+- **Quality gates**: ruff clean · mypy clean (49 files) · **94 tests pass** ·
   `selftest.all` green in ~25 s · **GitHub Actions CI green**.
   ⚠️ **Treat a green suite as weak evidence.** These same gates were green while **thirteen**
   correctness defects were live, four of which reached a submission, one of which scored
@@ -196,8 +196,9 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
 ## Next actions, in order
 1. **Build robust folds.** `cv.robust_build` now provides purged objective-disjoint and
    transcript-domain holdouts; these supersede ordinary grouped CV as promotion gates.
-2. **A100 ModernBERT ladder.** Smoke 500 sessions for one epoch, then train only objective
-   fold 0 on full data. Do not run five folds until that held-out regime improves.
+2. **L4-safe ModernBERT ladder.** Smoke 500 sessions for one epoch with batch size 1 and four
+   uniformly sampled chunks, then train only objective fold 0 on full data. Do not run five
+   folds until that held-out regime improves.
 3. **Domain confirmation.** Repeat one fold using transcript-domain holdout. A gain confined
    to ordinary/session CV is rejected as another shortcut.
 4. **Only after both gates pass**, run five folds, repeated seeds, inference packaging, and

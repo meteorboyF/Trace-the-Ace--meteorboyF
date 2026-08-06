@@ -106,6 +106,7 @@ def _assign_domains_to_folds(
 
 
 def _summary(frame: pd.DataFrame, kind: str, output: Path, cached: bool) -> dict[str, Any]:
+    _validate_folds(frame, kind)
     per_fold: dict[int, dict[str, Any]] = {}
     for fold, valid in frame.groupby("fold"):
         entry: dict[str, Any] = {
@@ -126,6 +127,20 @@ def _summary(frame: pd.DataFrame, kind: str, output: Path, cached: bool) -> dict
         "per_fold": per_fold,
         "cached": cached,
     }
+
+
+def _validate_folds(frame: pd.DataFrame, kind: str) -> None:
+    if frame["fold"].nunique() != 5 or frame["fold"].isna().any():
+        raise RuntimeError(f"{kind} folds must contain exactly five complete assignments")
+    if kind == "domain" and frame.groupby("session_id")["fold"].nunique().max() != 1:
+        raise RuntimeError("domain folds leak a session across validation folds")
+    if kind == "objective":
+        if frame.groupby("learning_objective_id")["fold"].nunique().max() != 1:
+            raise RuntimeError("objective folds split a learning objective")
+        for fold in sorted(frame["fold"].unique()):
+            train_idx, valid_idx = purged_split_indices(frame, int(fold))
+            if not len(train_idx) or not len(valid_idx):
+                raise RuntimeError(f"objective fold {fold} is empty after purging")
 
 
 @task(
@@ -175,6 +190,7 @@ def build(
         raise ValueError("kind must be 'objective' or 'domain'")
     if subsample is not None:
         output = interim_dir() / f"folds_{kind}_sub{subsample}.parquet"
+    _validate_folds(folds, kind)
     write_parquet(folds, output)
     log.info("cv.robust_build: %s, %d rows -> %s", kind, len(folds), output)
     return _summary(folds, kind, output, cached=False)
