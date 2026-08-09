@@ -90,14 +90,14 @@ def test_transformer_collator_covers_whole_lesson_with_compact_token_cache():
 
     class Tokenizer:
         pad_token_id = 0
+        cls_token_id = 98
+        sep_token_id = 99
+        bos_token_id = None
+        eos_token_id = None
 
         @staticmethod
         def encode(text, add_special_tokens=False):
             return list(range(40))
-
-        @staticmethod
-        def build_inputs_with_special_tokens(tokens):
-            return [98, *tokens, 99]
 
         @staticmethod
         def __call__(texts, **kwargs):

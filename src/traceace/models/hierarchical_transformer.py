@@ -148,6 +148,17 @@ class _Collator:
         self.chunk_tokens = chunk_tokens
         self.max_chunks = max_chunks
         self.objective_tokens = objective_tokens
+        # Transformers 5's TokenizersBackend no longer exposes the legacy
+        # build_inputs_with_special_tokens method. Construct the single-sequence
+        # wrapper from public token IDs so this works with both v4 and v5.
+        start_id = getattr(tokenizer, "cls_token_id", None)
+        if start_id is None:
+            start_id = getattr(tokenizer, "bos_token_id", None)
+        end_id = getattr(tokenizer, "sep_token_id", None)
+        if end_id is None:
+            end_id = getattr(tokenizer, "eos_token_id", None)
+        self.prefix_ids = [] if start_id is None else [int(start_id)]
+        self.suffix_ids = [] if end_id is None else [int(end_id)]
         # NumPy int32 uses ~4 bytes/token. A Python list of ints uses roughly 7x more and
         # grows into several GB over 22K long sessions.
         self.cache: dict[str, np.ndarray] = {}
@@ -165,7 +176,7 @@ class _Collator:
         encoded: list[list[list[int]]] = []
         for item in batch:
             tokens = self._tokens(item["text"])
-            payload = max(8, self.chunk_tokens - 2)
+            payload = max(1, self.chunk_tokens - len(self.prefix_ids) - len(self.suffix_ids))
             chunks = [tokens[i : i + payload] for i in range(0, len(tokens), payload)]
             if len(chunks) > self.max_chunks:
                 # Cover the whole lesson rather than silently retaining only its ending.
@@ -174,9 +185,7 @@ class _Collator:
             chunks = chunks or [np.asarray([], dtype=np.int32)]
             encoded.append(
                 [
-                    self.tokenizer.build_inputs_with_special_tokens(chunk.tolist())[
-                        : self.chunk_tokens
-                    ]
+                    (self.prefix_ids + chunk.tolist() + self.suffix_ids)[: self.chunk_tokens]
                     for chunk in chunks
                 ]
             )
