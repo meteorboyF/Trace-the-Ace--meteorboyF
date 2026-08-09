@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from traceace.io import LABEL_COL
 from traceace.robust_cv import assign_objective_folds, purged_split_indices
@@ -37,6 +38,38 @@ def test_purged_objective_split_has_no_session_or_objective_overlap():
         train, valid = folds.iloc[train_idx], folds.iloc[valid_idx]
         assert set(train["session_id"]).isdisjoint(valid["session_id"])
         assert set(train["learning_objective_id"]).isdisjoint(valid["learning_objective_id"])
+
+
+def test_gbdt_objective_masks_apply_the_same_session_and_objective_purge():
+    from traceace.models.gbdt import _outer_masks
+
+    folds = assign_objective_folds(_frame(), n_splits=5, seed=7)
+    for fold in sorted(folds["fold"].unique()):
+        train, valid = _outer_masks(folds, "objective", int(fold))
+        assert set(folds.loc[train, "session_id"]).isdisjoint(folds.loc[valid, "session_id"])
+        assert set(folds.loc[train, "learning_objective_id"]).isdisjoint(
+            folds.loc[valid, "learning_objective_id"]
+        )
+
+
+def test_full_objective_fold_health_rejects_degenerate_assignment():
+    from traceace.robust_cv import _validate_folds
+
+    rows = []
+    for objective in range(100):
+        # One fold gets only one objective; the other four receive the remainder.
+        fold = 0 if objective == 0 else 1 + ((objective - 1) % 4)
+        rows.append(
+            {
+                "response_id": f"r{objective}",
+                "session_id": f"s{objective}",
+                "learning_objective_id": f"lo{objective}",
+                LABEL_COL: float(objective % 2),
+                "fold": fold,
+            }
+        )
+    with pytest.raises(RuntimeError, match="degenerate"):
+        _validate_folds(pd.DataFrame(rows), "objective")
 
 
 def test_transformer_robust_split_cannot_expand_a_smoke_cohort(monkeypatch):

@@ -52,6 +52,24 @@ LO_COL = "learning_objective_id"
 LO_ENC_COL = "lo_prior_enc"
 
 
+def _outer_masks(frame: pd.DataFrame, split_mode: str, fold: int) -> tuple[pd.Series, pd.Series]:
+    """Return leakage-safe train/validation masks for one model fold."""
+    validation = frame["fold"].eq(fold)
+    if split_mode == "objective":
+        valid_sessions = set(frame.loc[validation, "session_id"].astype(str))
+        valid_objectives = set(frame.loc[validation, LO_COL].astype(str))
+        training = (
+            ~validation
+            & ~frame["session_id"].astype(str).isin(valid_sessions)
+            & ~frame[LO_COL].astype(str).isin(valid_objectives)
+        )
+    elif split_mode in {"session", "domain"}:
+        training = ~validation
+    else:
+        raise ValueError("split_mode must be 'session', 'objective', or 'domain'")
+    return training, validation
+
+
 def _fold_safe_pca(
     raw: np.ndarray,
     train_mask: np.ndarray,
@@ -176,6 +194,7 @@ def train(
     lo_smoothing: float = 20.0,
     cv_seed: int | None = None,
     content_pca_components: int = 48,
+    split_mode: str = "session",
 ) -> dict[str, Any]:
     import lightgbm as lgb
 
@@ -185,7 +204,17 @@ def train(
     seed = int(seed if seed is not None else cfg.seed)
     blocks = list(blocks or DEFAULT_BLOCKS)
 
-    folds = load_folds(subsample=subsample, cv_seed=cv_seed)
+    if split_mode == "session":
+        folds = load_folds(subsample=subsample, cv_seed=cv_seed)
+    elif split_mode in {"objective", "domain"}:
+        if cv_seed is not None:
+            raise ValueError("robust folds are fixed; cv_seed is only valid for session folds")
+        from ..robust_cv import load_robust_folds
+
+        folds = load_robust_folds(split_mode, subsample=subsample)
+        folds = folds[["response_id", "session_id", LABEL_COL, "fold"]].copy()
+    else:
+        raise ValueError("split_mode must be 'session', 'objective', or 'domain'")
     feats = load_train_features()
     base = folds.merge(
         feats[["response_id", "session_id", "learning_objective_id"]],
@@ -204,6 +233,11 @@ def train(
     # to use it — so we include it and keep reporting delta_vs_lo_only, which now measures
     # exactly what the transcript contributes ON TOP of knowing the topic.
     include_lo_prior = bool(include_lo_prior and LO_COL in frame.columns)
+    if split_mode == "objective" and include_lo_prior:
+        raise ValueError(
+            "objective-disjoint GBDT currently supports transcript-only evaluation; "
+            "a fold-safe support-aware prior must be implemented before enabling LO targets"
+        )
     base_feat_cols = list(feat_cols)
     content_raw_cols = [c for c in base_feat_cols if c.startswith("cont_raw_")]
     ordinary_cols = [c for c in base_feat_cols if c not in content_raw_cols]
@@ -239,14 +273,17 @@ def train(
     fold_ids = sorted(frame["fold"].unique())
 
     for k in pbar(fold_ids, desc="model.gbdt folds", unit="fold"):
-        tr = frame["fold"] != k
-        va = frame["fold"] == k
+        tr, va = _outer_masks(frame, split_mode, int(k))
+        if not tr.any() or not va.any():
+            raise RuntimeError(f"{split_mode} fold {k} has an empty train or validation side")
+        if not set(frame.loc[tr, "session_id"]).isdisjoint(frame.loc[va, "session_id"]):
+            raise RuntimeError(f"{split_mode} fold {k} leaks sessions")
         X = X_base[ordinary_cols].copy()
         if content_raw_cols:
             transformed = _fold_safe_pca(
                 X_base[content_raw_cols].to_numpy(dtype=np.float32),
                 tr.to_numpy(),
-                va.to_numpy(),
+                (~tr).to_numpy(),
                 content_k,
                 seed,
             )
@@ -342,6 +379,7 @@ def train(
             "lo_smoothing": lo_smoothing,
             "num_boost_round": num_boost_round,
             "early_stopping_rounds": early_stopping_rounds,
+            "split_mode": split_mode,
         }
         manifest_tmp = mdir / ".training_manifest.json.tmp"
         manifest_tmp.write_text(json.dumps(model_manifest, indent=2, default=str))
@@ -376,8 +414,14 @@ def train(
             "best_iterations": best_iters,
             "importance_path": str(imp_path),
             "top_features": imp_summary.head(15)["feature"].tolist(),
+            "split_mode": split_mode,
         }
     )
+    if split_mode != "session":
+        # Ordinary baseline OOF uses different training partitions and is not a valid
+        # comparator for a robust-fold model, even though the response cohort matches.
+        for key in ("baseline_lo_only_logloss", "delta_vs_lo_only", "beats_lo_only"):
+            res.pop(key, None)
     d = runs_dir() / "gbdt"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{experiment.replace('.', '_')}.json").write_text(json.dumps(res, indent=2, default=str))

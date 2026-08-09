@@ -70,6 +70,14 @@ def _collect_boosters(experiment: str) -> list[Any]:
     # Deliberately the FULL-data directory (subsample=None). A submission must never be
     # built from a subsampled smoke model — see evaluate.experiment_dir.
     mdir = experiment_dir(experiment, None)
+    manifest_path = mdir / "training_manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text())
+        if manifest.get("split_mode", "session") != "session":
+            raise RuntimeError(
+                f"{experiment!r} was trained on {manifest.get('split_mode')} research folds; "
+                "only session-fold production models may be packaged"
+            )
     expected = [mdir / f"fold{k}.txt" for k in range(int(cfg.cv["n_splits"]))]
     actual = sorted(mdir.glob("fold*.txt"))
     if actual != expected:

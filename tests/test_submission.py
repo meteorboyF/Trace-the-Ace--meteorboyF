@@ -267,6 +267,19 @@ def test_falsified_deployment_shrinkage_is_opt_in():
     assert inspect.signature(build).parameters["apply_deployment_shrinkage"].default is False
 
 
+def test_research_fold_models_cannot_be_packaged(synth_repo):
+    import json
+
+    from traceace.evaluate import experiment_dir
+    from traceace.packaging.build_submission import _collect_boosters
+
+    model_dir = experiment_dir("robust.transcript_only.domain")
+    model_dir.mkdir(parents=True)
+    (model_dir / "training_manifest.json").write_text(json.dumps({"split_mode": "domain"}))
+    with np.testing.assert_raises_regex(RuntimeError, "research folds"):
+        _collect_boosters("robust.transcript_only.domain")
+
+
 def test_verify_finds_the_smoke_csv_by_default(tmp_path):
     """A check that cannot fire is worse than no check — it reads as coverage.
 

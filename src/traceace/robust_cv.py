@@ -137,6 +137,12 @@ def _validate_folds(frame: pd.DataFrame, kind: str) -> None:
     if kind == "objective":
         if frame.groupby("learning_objective_id")["fold"].nunique().max() != 1:
             raise RuntimeError("objective folds split a learning objective")
+        objective_counts = frame.groupby("fold")["learning_objective_id"].nunique()
+        if frame["learning_objective_id"].nunique() >= 100 and int(objective_counts.min()) < 20:
+            raise RuntimeError(
+                "objective folds are degenerate: each full-data fold must hold at least "
+                f"20 objectives, got {objective_counts.to_dict()}"
+            )
         for fold in sorted(frame["fold"].unique()):
             train_idx, valid_idx = purged_split_indices(frame, int(fold))
             if not len(train_idx) or not len(valid_idx):

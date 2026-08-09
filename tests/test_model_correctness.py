@@ -390,3 +390,38 @@ def test_harmful_sparse_text_model_is_not_promoted(synth_repo, monkeypatch):
     assert result["promoted"] is False
     assert result["deployment_text_weight"] == 0.0
     assert result["logloss"] == pytest.approx(result["base_logloss"])
+
+
+def test_transcript_only_repeated_ablation_uses_isolated_namespace(synth_repo, monkeypatch):
+    from traceace import experiments
+
+    calls = []
+    monkeypatch.setattr(experiments, "_ensure_folds_and_baseline", lambda seed, sub: 0.6)
+
+    def fake_quiet(fn, **kwargs):
+        calls.append(kwargs)
+        return {"logloss": 0.59}
+
+    monkeypatch.setattr(experiments, "_quiet", fake_quiet)
+    result = experiments.ablation_repeated(
+        blocks=["structural", "linguistic"], seeds=[7], include_lo_prior=False
+    )
+    assert {call["experiment"] for call in calls} == {
+        "abl.noprior.full",
+        "abl.noprior.drop_structural",
+        "abl.noprior.drop_linguistic",
+    }
+    assert all(call["include_lo_prior"] is False for call in calls)
+    assert result["experiment_prefix"] == "abl.noprior"
+
+
+def test_transcript_only_ablation_cannot_reuse_historical_namespace(synth_repo):
+    from traceace.experiments import ablation_repeated
+
+    with pytest.raises(ValueError, match="reserved"):
+        ablation_repeated(
+            blocks=["structural"],
+            seeds=[7],
+            include_lo_prior=False,
+            experiment_prefix="abl",
+        )

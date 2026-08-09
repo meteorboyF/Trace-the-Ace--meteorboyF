@@ -127,6 +127,8 @@ def ablation_repeated(
     seeds: tuple[int, ...] | list[int] = DEFAULT_SEEDS,
     num_boost_round: int = 1200,
     early_stopping_rounds: int = 80,
+    include_lo_prior: bool = True,
+    experiment_prefix: str | None = None,
 ) -> dict[str, Any]:
     """Leave-one-block-out, paired within each fold assignment.
 
@@ -139,6 +141,14 @@ def ablation_repeated(
 
     blocks = list(blocks or ALL_BLOCKS)
     seeds = list(seeds)
+    experiment_prefix = experiment_prefix or ("abl" if include_lo_prior else "abl.noprior")
+    if not include_lo_prior and experiment_prefix == "abl":
+        raise ValueError(
+            "transcript-only ablations may not use the reserved 'abl' namespace; "
+            "use 'abl.noprior' or another explicit prefix"
+        )
+    if not experiment_prefix or experiment_prefix.endswith("."):
+        raise ValueError("experiment_prefix must be a non-empty dotted-name prefix")
 
     full_by_seed: dict[int, float] = {}
     drop_by_seed: dict[str, dict[int, float]] = {b: {} for b in blocks}
@@ -149,12 +159,13 @@ def ablation_repeated(
             _ensure_folds_and_baseline(s, subsample)
             r = _quiet(
                 train,
-                experiment="abl.full",
+                experiment=f"{experiment_prefix}.full",
                 blocks=blocks,
                 cv_seed=s,
                 subsample=subsample,
                 num_boost_round=num_boost_round,
                 early_stopping_rounds=early_stopping_rounds,
+                include_lo_prior=include_lo_prior,
             )
             full_by_seed[s] = float(r["logloss"])
             bar.update(1)
@@ -166,12 +177,13 @@ def ablation_repeated(
                     continue
                 rr = _quiet(
                     train,
-                    experiment=f"abl.drop_{b}",
+                    experiment=f"{experiment_prefix}.drop_{b}",
                     blocks=remaining,
                     cv_seed=s,
                     subsample=subsample,
                     num_boost_round=num_boost_round,
                     early_stopping_rounds=early_stopping_rounds,
+                    include_lo_prior=include_lo_prior,
                 )
                 drop_by_seed[b][s] = float(rr["logloss"])
                 bar.update(1)
@@ -185,6 +197,8 @@ def ablation_repeated(
     out: dict[str, Any] = {
         "seeds": seeds,
         "blocks": blocks,
+        "include_lo_prior": include_lo_prior,
+        "experiment_prefix": experiment_prefix,
         "all_blocks": full_summary.to_dict(),
         "marginal_contribution": {r.name: r.to_dict() for r in results},
         "ranked": [r.name for r in sorted(results, key=lambda r: -r.mean)],
@@ -192,14 +206,106 @@ def ablation_repeated(
     }
     d = runs_dir() / "interpret"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "ablation_repeated.json").write_text(json.dumps(out, indent=2, default=str))
-    out["output_path"] = str(d / "ablation_repeated.json")
+    report_name = (
+        "ablation_repeated.json"
+        if experiment_prefix == "abl" and include_lo_prior
+        else f"ablation_repeated_{experiment_prefix.replace('.', '_')}.json"
+    )
+    (d / report_name).write_text(json.dumps(out, indent=2, default=str))
+    out["output_path"] = str(d / report_name)
 
     print(f"\nPAIRED leave-one-block-out across {len(seeds)} fold assignments")
     print("positive = removing the block made log loss WORSE (block contributes)\n")
     print(format_table(results))
     print(f"\nall_blocks logloss: {full_summary.mean:.5f} ± {full_summary.sd:.5f}")
     return out
+
+
+@task(
+    "evaluate.robust_gbdt",
+    requires="cpu",
+    max_tier="cpu",
+    description="retrain transcript-only GBDT on genuine domain/objective holdouts",
+)
+def robust_gbdt(
+    force: bool = False,
+    subsample: int | None = None,
+    kind: str = "domain",
+    blocks: list[str] | None = None,
+    num_boost_round: int = 1600,
+    early_stopping_rounds: int = 100,
+    experiment: str | None = None,
+) -> dict[str, Any]:
+    """Measure transcript transfer after retraining with entire domains/objectives held out."""
+    import numpy as np
+
+    from .evaluate import auc, load_oof, logloss
+    from .io import LABEL_COL
+    from .models.gbdt import train
+    from .robust_cv import load_robust_folds, purged_split_indices
+
+    if kind not in {"domain", "objective"}:
+        raise ValueError("kind must be 'domain' or 'objective'")
+    experiment = experiment or f"robust.transcript_only.{kind}"
+    result = train(
+        force=force,
+        subsample=subsample,
+        experiment=experiment,
+        blocks=blocks,
+        num_boost_round=num_boost_round,
+        early_stopping_rounds=early_stopping_rounds,
+        include_lo_prior=False,
+        split_mode=kind,
+    )
+    folds = load_robust_folds(kind, subsample=subsample).reset_index(drop=True)
+    prior = np.full(len(folds), np.nan, dtype=float)
+    per_fold: list[dict[str, Any]] = []
+    model_oof = load_oof(experiment, subsample=subsample).set_index("response_id")
+    for fold in sorted(int(value) for value in folds["fold"].unique()):
+        valid = folds["fold"].eq(fold).to_numpy()
+        if kind == "objective":
+            train_idx, valid_idx = purged_split_indices(folds, fold)
+            valid = np.zeros(len(folds), dtype=bool)
+            valid[valid_idx] = True
+        else:
+            train_idx = np.flatnonzero(~valid)
+        base_rate = float(folds.iloc[train_idx][LABEL_COL].mean())
+        prior[valid] = base_rate
+        ids = folds.loc[valid, "response_id"].astype(str)
+        y_fold = folds.loc[valid, LABEL_COL].to_numpy(dtype=float)
+        p_fold = model_oof.loc[ids, "pred"].to_numpy(dtype=float)
+        per_fold.append(
+            {
+                "fold": fold,
+                "n_train": int(len(train_idx)),
+                "n_valid": int(valid.sum()),
+                "logloss": logloss(y_fold, p_fold),
+                "prior_logloss": logloss(y_fold, np.full(len(y_fold), base_rate)),
+                "auc": auc(y_fold, p_fold),
+            }
+        )
+    if not np.isfinite(prior).all():
+        raise RuntimeError("robust prior baseline left validation rows unassigned")
+    y = folds[LABEL_COL].to_numpy(dtype=float)
+    prior_loss = logloss(y, prior)
+    result.update(
+        {
+            "kind": kind,
+            "prior_logloss": prior_loss,
+            "gain_vs_prior": prior_loss - float(result["logloss"]),
+            "per_fold": per_fold,
+            "folds_beating_prior": int(
+                sum(row["logloss"] < row["prior_logloss"] for row in per_fold)
+            ),
+        }
+    )
+    path = runs_dir() / "robust_gbdt"
+    path.mkdir(parents=True, exist_ok=True)
+    suffix = "" if subsample is None else f"__sub{subsample}"
+    report = path / f"{experiment.replace('.', '_')}{suffix}.json"
+    report.write_text(json.dumps(result, indent=2, default=str))
+    result["output_path"] = str(report)
+    return result
 
 
 @task(

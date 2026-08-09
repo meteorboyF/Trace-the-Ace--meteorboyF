@@ -45,11 +45,9 @@ the evaluation: response-disjoint cross-fitting gives **+0.00546**. The directio
 strong and materially larger than any individual feature block, but the earlier estimate was
 optimistic and must not be quoted as held-out evidence.
 
-✅ **The shrinkage artifact is built and verified: 26 checks, 0 failures.** The bundle carries
-`{weight: 0.55, base_rate: 0.70247}`, `main.py` applies it after calibration, and smoke
-predictions tightened from std ≈0.16 / range 0.21–0.95 to **std 0.085 / range 0.517–0.826**.
-CV reproduced exactly (0.54228 / AUC 0.7235 / Δ −0.00956), confirming the rebuild changed
-nothing but calibration.
+❌ **Deployment shrinkage is retired.** Its leaderboard run worsened log loss from 0.6106
+to 0.6133 at identical AUROC. Packaging defaults to no shrinkage and requires an explicit
+research-only opt-in to reproduce it.
 
 🔍 **ADR-018 — a verify check that could never fire.** Found while re-verifying the above.
 `submission.verify` looked for its CSV in `_staging/` (the zip *build* dir, which never holds
@@ -61,9 +59,9 @@ checked exactly, against the format each run was actually handed. A new
 itself a failure. **Thirteenth silent-correctness defect; third of the species
 "verification inspects structure, never behaviour."**
 
-⚠️ **Two things need YOU, not me:**
-1. **Submit the shrinkage build** — 1 slot left this week. See [`RUNBOOK.md`](RUNBOOK.md).
-2. **The L4 run** — this machine has no GPU. Cells are staged in the notebook.
+⚠️ **Current operator action:** build and verify the freshly retrained transcript-only
+candidate. Do not upload until its manifest, smoke execution and complete verifier report
+have been inspected.
 
 ⚠️ **Stale numbers to redo:** `interpret.ablation_repeated` and `evaluate.unseen_lo` were both
 measured *before* the target-encoding leakage fix (ADR-014). Their FINDINGS.md figures are
@@ -182,6 +180,10 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
 8. **Hierarchical ModernBERT is rejected.** The 3,000-session A100 pilot scored 0.58222
    versus a 0.58112 training-rate baseline (AUROC 0.4404); its conditional head was
    actively harmful. Five-fold/full-data training is disabled in the runner.
+9. **Transcript-only transfer now has genuine hard-fold evidence.** An 80-round diagnostic
+   retrained on domain-cluster holdouts scored 0.59494 / AUC 0.6052 and beat the fold-local
+   prior in 5/5 folds. Purged objective holdouts scored 0.59706 / AUC 0.5958 and also beat
+   the prior 5/5. These are deliberately under-tuned diagnostics, not submission estimates.
 
 ## Leaderboard evidence (supersedes shrinkage simulations)
 - Unshrunk deployable model: **log loss 0.6106 / AUROC 0.6014 / rank 45**.
@@ -197,13 +199,14 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
   reconstructed objective difficulty; this route is rejected for deployment.
 
 ## Next actions, in order
-1. **Deployable sparse text:** train hashed word/character dialogue features with
-   `model.sparse_text`. Objective wording selects windows but is excluded from the predictor.
-2. **Cross-fitted promotion:** `ensemble.promote_text` selects each blend weight without the
-   held-out fold and assigns zero deployment weight unless gain is at least 0.0003.
-3. **Robust confirmation:** repeat promoted candidates on transcript-domain and purged
-   objective splits; a gain confined to ordinary session CV is treated as a shortcut.
-4. **Only after those gates pass**, calibrate the hybrid, package it, and run container parity.
+1. **Transcript-only submission:** retrain, verify and use one slot to test the predeclared
+   hypothesis that objective difficulty causes the CV-to-leaderboard collapse.
+2. **Namespaced no-prior ablation:** run `interpret.ablation_repeated` with
+   `experiment_prefix="abl.noprior"`; the historical `abl.*` evidence is write-protected.
+3. **Robust confirmation:** `evaluate.robust_gbdt` now genuinely retrains on domain and
+   purged-objective holdouts. Research-fold models are structurally forbidden from packaging.
+4. **Support-aware prior:** implement only after the transcript-only leaderboard result,
+   with fold-specific support and simulated unseen objectives during training.
 5. **Move taxonomy**: `annotate.moves` (vLLM backend), then `model.move_classifier`, then
    move-distribution features. ~40 units — hold until step 3 and 4 have landed.
 6. **A100 timing validation (~4 units)** only immediately before a real submission.
