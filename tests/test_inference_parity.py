@@ -147,3 +147,11 @@ def test_main_py_does_not_use_cross_row_aggregates():
     from traceace.packaging.main_template import MAIN_TEMPLATE
 
     assert "[keep],  # SAFE: no other test rows consulted" in MAIN_TEMPLATE
+
+
+def test_main_builds_sparse_text_with_shared_inference_function():
+    from traceace.packaging.main_template import MAIN_TEMPLATE
+
+    assert "stlib.sparse_text_document(" in MAIN_TEMPLATE
+    assert 'sparse_text_config.get("max_chars", 8000)' in MAIN_TEMPLATE
+    assert "sparse_text_model.predict_proba(text_documents)" in MAIN_TEMPLATE

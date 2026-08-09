@@ -242,12 +242,7 @@ def test_scrambled_feature_order_is_detected(synth_repo):
 
 
 def test_shrinkage_preserves_ranking_and_pulls_toward_base_rate():
-    """Deployment shrinkage must be ranking-invariant — that is why it is safe.
-
-    We deliberately trade log loss on the easy training regime for log loss on the harder
-    deployed one (ADR-017). The one thing that must NOT change is the ordering, since AUROC
-    0.6014 on the leaderboard says the ranking is the part that works.
-    """
+    """Retired shrinkage remains reproducible and ranking-invariant when explicitly used."""
     from traceace.evaluate import auc
     from traceace.packaging.inference_lib import apply_shrinkage
 
@@ -262,6 +257,14 @@ def test_shrinkage_preserves_ranking_and_pulls_toward_base_rate():
         # spread shrinks toward the base rate, and the mean moves toward it
         assert q.std() <= p.std() + 1e-12
         assert abs(q.mean() - base) <= abs(p.mean() - base) + 1e-12
+
+
+def test_falsified_deployment_shrinkage_is_opt_in():
+    import inspect
+
+    from traceace.packaging.build_submission import build
+
+    assert inspect.signature(build).parameters["apply_deployment_shrinkage"].default is False
 
 
 def test_verify_finds_the_smoke_csv_by_default(tmp_path):

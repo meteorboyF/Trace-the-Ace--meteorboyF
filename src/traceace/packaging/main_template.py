@@ -50,6 +50,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import inference_lib as ilib
+import sparse_text_lib as stlib
 
 DATA = HERE / "data"
 ASSETS = HERE / "assets"
@@ -77,6 +78,9 @@ def main() -> int:
     fallback = float(bundle.get("fallback_prob", 0.5))
     lo_prior = dict(bundle.get("lo_prior", {}))
     shrinkage = bundle.get("shrinkage")
+    sparse_text_model = bundle.get("sparse_text_model")
+    sparse_text_config = dict(bundle.get("sparse_text_config") or {})
+    hybrid_promotion = bundle.get("hybrid_promotion")
     lo_prior_by_booster = list(bundle.get("lo_prior_by_booster", []))
     log("assets loaded")
 
@@ -162,6 +166,16 @@ def main() -> int:
             lo_id = r.get("learning_objective_id")
             feats["lo_prior_enc"] = float(lo_prior.get(str(lo_id), fallback))
             feats["response_id"] = r["response_id"]
+            feats["_text_document"] = (
+                stlib.sparse_text_document(
+                    tdf,
+                    keep,
+                    max_chars=int(sparse_text_config.get("max_chars", 8000)),
+                    context_utterances=int(sparse_text_config.get("context_utterances", 96)),
+                )
+                if transcript_ok
+                else ""
+            )
             feats["_lo_id"] = lo_id
             feats["_use_fallback"] = not transcript_ok
             rows.append(feats)
@@ -181,6 +195,7 @@ def main() -> int:
         pass
 
     lo_ids = X.pop("_lo_id").to_numpy() if "_lo_id" in X.columns else None
+    text_documents = X.pop("_text_document").astype(str).tolist()
     use_fallback = X.pop("_use_fallback").to_numpy(dtype=bool)
     ids = X.pop("response_id").to_numpy()
     for c in feature_cols:
@@ -212,6 +227,17 @@ def main() -> int:
             )
         preds = preds + np.asarray(b.predict(X_fold), dtype=float)
     preds = preds / max(len(boosters), 1)
+
+    if hybrid_promotion is not None:
+        if sparse_text_model is None:
+            raise RuntimeError("hybrid promotion is missing its sparse text model")
+        text_weight = float(hybrid_promotion["deployment_text_weight"])
+        text_preds = np.asarray(sparse_text_model.predict_proba(text_documents)[:, 1], dtype=float)
+        base_logit = np.log(np.clip(preds, EPS, 1.0 - EPS) / np.clip(1.0 - preds, EPS, 1.0))
+        text_logit = np.log(
+            np.clip(text_preds, EPS, 1.0 - EPS) / np.clip(1.0 - text_preds, EPS, 1.0)
+        )
+        preds = 1.0 / (1.0 + np.exp(-((1.0 - text_weight) * base_logit + text_weight * text_logit)))
     log("model predicted")
 
     if calibrator is not None:

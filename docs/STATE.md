@@ -179,6 +179,9 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
 6. Local env now has **torch (CPU) + sentence-transformers** installed so GPU code paths can
    be validated before spending units — a deliberate relaxation of ADR-005.
 7. Git SHAs in early run manifests read `unknown` (they predate the first commit).
+8. **Hierarchical ModernBERT is rejected.** The 3,000-session A100 pilot scored 0.58222
+   versus a 0.58112 training-rate baseline (AUROC 0.4404); its conditional head was
+   actively harmful. Five-fold/full-data training is disabled in the runner.
 
 ## Leaderboard evidence (supersedes shrinkage simulations)
 - Unshrunk deployable model: **log loss 0.6106 / AUROC 0.6014 / rank 45**.
@@ -194,15 +197,13 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
   reconstructed objective difficulty; this route is rejected for deployment.
 
 ## Next actions, in order
-1. **Build robust folds.** `cv.robust_build` now provides purged objective-disjoint and
-   transcript-domain holdouts; these supersede ordinary grouped CV as promotion gates.
-2. **L4-safe ModernBERT ladder.** Smoke 500 sessions for one epoch with batch size 1 and four
-   uniformly sampled chunks, then train only objective fold 0 on full data. Do not run five
-   folds until that held-out regime improves.
-3. **Domain confirmation.** Repeat one fold using transcript-domain holdout. A gain confined
-   to ordinary/session CV is rejected as another shortcut.
-4. **Only after both gates pass**, run five folds, repeated seeds, inference packaging, and
-   A100 container timing. See [`TRANSFORMER_PLAN.md`](TRANSFORMER_PLAN.md).
+1. **Deployable sparse text:** train hashed word/character dialogue features with
+   `model.sparse_text`. Objective wording selects windows but is excluded from the predictor.
+2. **Cross-fitted promotion:** `ensemble.promote_text` selects each blend weight without the
+   held-out fold and assigns zero deployment weight unless gain is at least 0.0003.
+3. **Robust confirmation:** repeat promoted candidates on transcript-domain and purged
+   objective splits; a gain confined to ordinary session CV is treated as a shortcut.
+4. **Only after those gates pass**, calibrate the hybrid, package it, and run container parity.
 5. **Move taxonomy**: `annotate.moves` (vLLM backend), then `model.move_classifier`, then
    move-distribution features. ~40 units — hold until step 3 and 4 have landed.
 6. **A100 timing validation (~4 units)** only immediately before a real submission.
@@ -211,7 +212,7 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
    means every prior ablation is stale.
 
 ## Compute budget
-733 units, **4.69 spent** at the last synced run. Plan (ADR-008): ~0 CPU ladder · ~5 embeddings · ~40 LLM
+733 units, **8.33 spent** at the last A100 pilot. Plan (ADR-008): ~0 CPU ladder · ~5 embeddings · ~40 LLM
 annotation · ~30 classifier iteration · ~15 A100 timing. **~600 held in reserve until
 week 3.** Flag anything projected above 25 units for a single task.
 

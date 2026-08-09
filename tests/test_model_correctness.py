@@ -329,3 +329,64 @@ def test_shrinkage_gain_is_crossfit_and_excludes_overlapping_rows():
     y, pred = _crossfit_shrinkage(draws)
     assert len(y) == len(pred) == 6
     assert np.isfinite(pred).all()
+
+
+def test_sparse_text_document_is_role_aware_bounded_and_relevance_first():
+    from traceace.packaging.sparse_text_lib import sparse_text_document
+
+    frame = pd.DataFrame(
+        {
+            "role": ["tutor", "student", "tutor", "student"],
+            "content": ["intro", "twenty one", "good correction", "final answer"],
+        }
+    )
+    document = sparse_text_document(frame, [(1, 3)], max_chars=120, context_utterances=2)
+    assert document.startswith("<relevant_dialogue>\n<student> twenty one")
+    assert "<tutor> good correction" in document
+    assert len(document) <= 120
+
+
+def test_sparse_text_pipeline_uses_fixed_hashing_and_predicts_probabilities():
+    from traceace.models.sparse_text import _pipeline
+
+    documents = [
+        "<student> correct because twelve divided by three is four",
+        "<student> I do not know <tutor> try again",
+    ] * 8
+    labels = np.asarray([1, 0] * 8)
+    model = _pipeline(seed=7, alpha=1e-4).fit(documents, labels)
+    probabilities = model.predict_proba(documents)[:, 1]
+    assert np.isfinite(probabilities).all()
+    assert ((probabilities > 0) & (probabilities < 1)).all()
+    assert model.named_steps["features"].transformer_list[0][1].n_features == 2**16
+
+
+def test_harmful_sparse_text_model_is_not_promoted(synth_repo, monkeypatch):
+    from traceace import ensemble
+
+    n = 100
+    y = np.asarray([0, 1] * (n // 2), dtype=float)
+    base_pred = np.where(y == 1, 0.7, 0.3)
+    text_pred = 1.0 - base_pred
+    common = {
+        "response_id": [f"r{i}" for i in range(n)],
+        "session_id": [f"s{i}" for i in range(n)],
+        LABEL_COL: y,
+    }
+    frames = {
+        "model.gbdt": pd.DataFrame({**common, "pred": base_pred}),
+        "model.sparse_text": pd.DataFrame({**common, "pred": text_pred}),
+    }
+    folds = pd.DataFrame(
+        {
+            "response_id": common["response_id"],
+            "fold": np.arange(n) % 5,
+        }
+    )
+    monkeypatch.setattr(ensemble, "load_oof", lambda experiment, subsample=None: frames[experiment])
+    monkeypatch.setattr(ensemble, "_file_sha256", lambda path: "synthetic")
+    monkeypatch.setattr("traceace.cv.load_folds", lambda subsample=None: folds)
+    result = ensemble.promote_text()
+    assert result["promoted"] is False
+    assert result["deployment_text_weight"] == 0.0
+    assert result["logloss"] == pytest.approx(result["base_logloss"])

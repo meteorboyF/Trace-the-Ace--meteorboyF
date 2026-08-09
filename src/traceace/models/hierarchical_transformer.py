@@ -319,7 +319,7 @@ def train(
     weight_decay: float = 0.01,
     objective_dropout: float = 0.5,
     auxiliary_weight: float = 0.5,
-    inference_blend: float = 0.5,
+    inference_blend: float = 0.0,
     seed: int = 1234,
 ) -> dict[str, Any]:
     import torch

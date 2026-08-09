@@ -51,6 +51,7 @@ _TASK_MODULES = [
     "traceace.robust_cv",
     "traceace.models.baseline",
     "traceace.models.gbdt",
+    "traceace.models.sparse_text",
     "traceace.models.bge_attention",
     "traceace.models.hierarchical_transformer",
     "traceace.models.move_classifier",

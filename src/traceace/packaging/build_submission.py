@@ -17,6 +17,7 @@ used as a fallback when a transcript cannot be read.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import zipfile
@@ -24,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import get_config
-from ..evaluate import experiment_dir
+from ..evaluate import experiment_dir, experiment_name, oof_path
 from ..io import LABEL_COL, load_train
 from ..logging_utils import get_logger
 from ..paths import submission_dir
@@ -33,6 +34,15 @@ from ..tasks import task
 from .main_template import render_main
 
 log = get_logger("submission.build")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 # These feature families currently have training/research implementations but no matching
 # offline implementation in main.py. Packaging them would otherwise create a plausible model
@@ -151,6 +161,8 @@ def build(
     force: bool = False,
     subsample: int | None = None,
     output_name: str = "submission.zip",
+    blend_experiment: str | None = "ensemble.hybrid",
+    apply_deployment_shrinkage: bool = False,
 ) -> dict[str, Any]:
     import joblib
 
@@ -170,6 +182,8 @@ def build(
     # --- the shared feature library, copied verbatim (no train/serve skew) ---
     lib_src = Path(__file__).resolve().parent / "inference_lib.py"
     shutil.copyfile(lib_src, staging / "inference_lib.py")
+    sparse_lib_src = Path(__file__).resolve().parent / "sparse_text_lib.py"
+    shutil.copyfile(sparse_lib_src, staging / "sparse_text_lib.py")
 
     # --- model bundle -------------------------------------------------------
     boosters = _collect_boosters(experiment)
@@ -179,8 +193,52 @@ def build(
     # Ship the PLAIN-NUMBER calibrator, never the fitted sklearn estimator: the runtime's
     # scikit-learn version differs from ours and unpickling across versions warns of
     # "invalid results" (observed in a container smoke test, 2026-07-27).
+    promotion = None
+    sparse_text_model = None
+    sparse_text_config = None
+    calibration_experiment = experiment
+    if blend_experiment is not None:
+        promotion_path = experiment_dir(blend_experiment, None) / "promotion.joblib"
+        if promotion_path.is_file():
+            candidate = dict(joblib.load(promotion_path))
+            if candidate.get("promoted"):
+                if candidate.get("base_experiment") != experiment:
+                    raise RuntimeError("hybrid promotion was fitted against a different base model")
+                text_experiment = str(candidate["text_experiment"])
+                text_path = experiment_dir(text_experiment, None) / "deployment.joblib"
+                if not text_path.is_file():
+                    raise FileNotFoundError("promoted sparse-text deployment model is missing")
+                sparse_text_model = joblib.load(text_path)
+                expected_hashes = {
+                    "base_oof_sha256": oof_path(experiment_name(experiment, None)),
+                    "text_oof_sha256": oof_path(experiment_name(text_experiment, None)),
+                    "text_model_sha256": text_path,
+                }
+                stale = [
+                    name
+                    for name, path in expected_hashes.items()
+                    if not path.is_file() or candidate.get(name) != _file_sha256(path)
+                ]
+                if stale:
+                    raise RuntimeError(
+                        f"hybrid promotion is stale for {stale}; rerun ensemble.promote_text"
+                    )
+                text_manifest_path = (
+                    experiment_dir(text_experiment, None) / "training_manifest.json"
+                )
+                if not text_manifest_path.is_file():
+                    raise FileNotFoundError("promoted sparse-text training manifest is missing")
+                text_manifest = json.loads(text_manifest_path.read_text())
+                sparse_text_config = dict(text_manifest.get("run_config", {}))
+                if not {"max_chars", "context_utterances"}.issubset(sparse_text_config):
+                    raise RuntimeError("sparse-text manifest lacks inference configuration")
+                promotion = candidate
+                calibration_experiment = blend_experiment
+        else:
+            log.info("no hybrid promotion artifact; packaging the base model only")
+
     calibrator = None
-    plain_path = experiment_dir(experiment, None) / "calibrator_plain.joblib"
+    plain_path = experiment_dir(calibration_experiment, None) / "calibrator_plain.joblib"
     if plain_path.is_file():
         calibrator = joblib.load(plain_path)
 
@@ -191,11 +249,16 @@ def build(
         "calibrator": calibrator,
         "lo_vectorizer": fit_lo_vectorizer(),
         "lo_prior": _lo_prior(),
-        "shrinkage": _shrinkage(experiment),
+        # Leaderboard evidence falsified the old unseen-objective shrinkage proxy
+        # (0.6106 -> 0.6133 at identical AUROC). It is opt-in for reproducibility only.
+        "shrinkage": _shrinkage(experiment) if apply_deployment_shrinkage else None,
         "lo_prior_by_booster": fold_lo_priors,
         "fallback_prob": float(train_df[LABEL_COL].mean()),
         "seed": cfg.seed,
         "experiment": experiment,
+        "sparse_text_model": sparse_text_model,
+        "sparse_text_config": sparse_text_config,
+        "hybrid_promotion": promotion,
     }
     with heartbeat("writing model bundle"):
         joblib.dump(bundle, staging / "assets" / "model.joblib", compress=3)
@@ -206,6 +269,8 @@ def build(
         "n_features": len(feature_cols),
         "target_encoding": "fold_specific" if fold_lo_priors else "absent",
         "calibrator": (calibrator or {}).get("method", "none"),
+        "hybrid": bool(promotion),
+        "deployment_shrinkage": bool(apply_deployment_shrinkage),
         "sklearn_build_version": __import__("sklearn").__version__,
         "seed": cfg.seed,
         "clip_eps": cfg.predict_clip_eps,
