@@ -19,15 +19,28 @@
 | 2 | — | — | — | — | (slot spent on a smoke test) |
 | 2 | — | **0.6106** | **0.6014** | **#45** | 🟡 works, but **overconfident** |
 
-**Submission 3 is the real baseline.** AUROC 0.6014 says the ranking carries genuine signal;
+**Submission 3 is the real baseline.**
+
+> ⛔ **2026-08-18 — the diagnosis below was WRONG. Read [`ENDGAME.md`](ENDGAME.md) first.**
+> The two shipped shrinkage settings (w=1.00 → 0.6106, w=0.55 → 0.6133) fit
+> `LL(w) = C + G(w²−2w)` exactly, giving **w\* = 1.0**: the model was *already optimally
+> calibrated on the test set*. It was never overconfident. The fitted discrimination gain
+> G = 0.01333 matches the independent prediction from our LB AUROC (0.01369) to 4×10⁻⁵.
+> **87% of the gap to #1 is AUROC, not calibration**, and the per-objective difficulty lookup
+> — ~80% of our CV AUROC — is worth ≈0 on unseen objectives. Session-grouped CV has been
+> selecting models on a metric that is ~80% irrelevant to the leaderboard.
+> The remainder of this section is retained as the record of a superseded hypothesis.
+
+~~AUROC 0.6014 says the ranking carries genuine signal;
 0.6106 log loss says the probabilities are too extreme for how hard the test regime is. That
 gap is *not* brokenness and not noise — it is structural, and it is bigger than every feature
-gain we have measured combined.
+gain we have measured combined.~~
 
-**Diagnosis.** Our CV regime is easier than the test regime: 99.7% of validation rows have an
+**~~Diagnosis.~~** Our CV regime is easier than the test regime: 99.7% of validation rows have an
 objective seen in training, and every session comes from one provider. The test set contains
-unseen objectives and (per the forum) more than one provider. A model tuned to be confident on
-the easy regime is systematically overconfident on the hard one.
+unseen objectives and (per the forum) more than one provider. ~~A model tuned to be confident on
+the easy regime is systematically overconfident on the hard one.~~ The domain shift is real; its
+consequence is **lost discrimination**, not miscalibration.
 
 **Fix, ready to ship: deployment shrinkage** (ADR-017). `p' = base + w·(p − base)`, with
 **w = 0.55** and base = 0.70247, fitted on a 34,446-row unseen-objective holdout — never on
@@ -199,20 +212,27 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
   reconstructed objective difficulty; this route is rejected for deployment.
 
 ## Next actions, in order
-1. **Transcript-only submission:** retrain, verify and use one slot to test the predeclared
-   hypothesis that objective difficulty causes the CV-to-leaderboard collapse.
-2. **Namespaced no-prior ablation:** run `interpret.ablation_repeated` with
-   `experiment_prefix="abl.noprior"`; the historical `abl.*` evidence is write-protected.
-3. **Robust confirmation:** `evaluate.robust_gbdt` now genuinely retrains on domain and
-   purged-objective holdouts. Research-fold models are structurally forbidden from packaging.
-4. **Support-aware prior:** implement only after the transcript-only leaderboard result,
-   with fold-specific support and simulated unseen objectives during training.
-5. **Move taxonomy**: `annotate.moves` (vLLM backend), then `model.move_classifier`, then
-   move-distribution features. ~40 units — hold until step 3 and 4 have landed.
+
+> **Superseded 2026-08-18 by [`ENDGAME.md`](ENDGAME.md)** — that document is the operative
+> plan for the remaining 9 days. Summary of the change: the objective-purged fold AUROC,
+> averaged **within** fold, replaces session-grouped CV log loss as the metric that decides
+> anything; unit hoarding ends (~729 units for 9 days ≈ 60 A100-hours); the priority is a
+> fine-tuned transcript encoder, because 87% of the leaderboard gap is discrimination.
+>
+> A transcript-only diagnostic submission — previously step 1 here — is **no longer worth a
+> slot**: §1 of ENDGAME.md answers it offline.
+
+1. `evaluate.by_objective_fold` — within-fold AUROC harness. Everything depends on it.
+2. Re-score **all** existing OOF under it, including the rejected `bge_attention` and
+   ModernBERT pilots. They were rejected on a metric that does not measure test performance.
+3. `features.lo_semantic_difficulty` — LO text → difficulty for unseen objectives (+0.007 AUROC).
+4. Neural transcript model, response-level, retrieval-selected windows (ENDGAME.md §3 Phase 1).
+5. Move taxonomy via local vLLM — contingent on step 4, and the write-up centrepiece regardless.
 6. **A100 timing validation (~4 units)** only immediately before a real submission.
 7. Tuning the existing tree is **not** a next action — a capacity sweep showed the plateau.
-8. **Always** re-run `interpret.ablation_repeated` after adding a deployable block; substitutability
-   means every prior ablation is stale.
+8. **Always** re-run ablations after adding a deployable block; substitutability
+   means every prior ablation is stale. All current ablation verdicts are additionally stale
+   because they were measured on session-grouped CV.
 
 ## Compute budget
 733 units, **8.33 spent** at the last A100 pilot. Plan (ADR-008): ~0 CPU ladder · ~5 embeddings · ~40 LLM
