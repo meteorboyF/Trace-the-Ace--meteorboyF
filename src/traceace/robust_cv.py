@@ -25,10 +25,19 @@ from .tasks import task
 log = get_logger("robust_cv")
 
 
-def robust_folds_path(kind: str) -> Path:
+def robust_folds_path(kind: str, fold_seed: int | None = None) -> Path:
+    """Path for a robust fold table.
+
+    ``fold_seed`` produces an *alternative assignment of the same objectives to folds*.
+    Objective folds are far noisier than session folds — each holds only ~80 of 398
+    objectives, and objective difficulty is lumpy — so a single assignment gives paired
+    deltas with an SD around 0.037 AUC. Decisions need repeats (``evaluate.objective_repeated``),
+    which is what these namespaced tables are for. ``None`` is the canonical assignment.
+    """
     if kind not in {"objective", "domain"}:
         raise ValueError(f"unknown robust fold kind {kind!r}")
-    return interim_dir() / f"folds_{kind}.parquet"
+    suffix = "" if fold_seed is None else f"_s{int(fold_seed)}"
+    return interim_dir() / f"folds_{kind}{suffix}.parquet"
 
 
 def assign_objective_folds(frame: pd.DataFrame, n_splits: int, seed: int) -> pd.DataFrame:
@@ -160,9 +169,10 @@ def build(
     subsample: int | None = None,
     kind: str = "objective",
     n_domains: int = 20,
+    fold_seed: int | None = None,
 ) -> dict[str, Any]:
     cfg = get_config()
-    output = robust_folds_path(kind)
+    output = robust_folds_path(kind, fold_seed)
     if output.is_file() and not force and subsample is None:
         return _summary(pd.read_parquet(output), kind, output, cached=True)
     frame = load_train()
@@ -171,7 +181,9 @@ def build(
         frame = frame[frame["session_id"].isin(sessions)].copy()
     n_splits = int(cfg.cv["n_splits"])
     if kind == "objective":
-        folds = assign_objective_folds(frame, n_splits, int(cfg.seed))
+        folds = assign_objective_folds(
+            frame, n_splits, int(cfg.seed if fold_seed is None else fold_seed)
+        )
     elif kind == "domain":
         from .features.assemble import build_matrix
 
@@ -195,19 +207,26 @@ def build(
     else:
         raise ValueError("kind must be 'objective' or 'domain'")
     if subsample is not None:
-        output = interim_dir() / f"folds_{kind}_sub{subsample}.parquet"
+        suffix = "" if fold_seed is None else f"_s{int(fold_seed)}"
+        output = interim_dir() / f"folds_{kind}_sub{subsample}{suffix}.parquet"
     _validate_folds(folds, kind)
     write_parquet(folds, output)
     log.info("cv.robust_build: %s, %d rows -> %s", kind, len(folds), output)
     return _summary(folds, kind, output, cached=False)
 
 
-def load_robust_folds(kind: str, subsample: int | None = None) -> pd.DataFrame:
-    output = (
-        robust_folds_path(kind)
-        if subsample is None
-        else interim_dir() / f"folds_{kind}_sub{subsample}.parquet"
-    )
+def load_robust_folds(
+    kind: str, subsample: int | None = None, fold_seed: int | None = None
+) -> pd.DataFrame:
+    if subsample is None:
+        output = robust_folds_path(kind, fold_seed)
+    else:
+        suffix = "" if fold_seed is None else f"_s{int(fold_seed)}"
+        output = interim_dir() / f"folds_{kind}_sub{subsample}{suffix}.parquet"
     if not output.is_file():
-        raise FileNotFoundError(f"{output} missing — run cv.robust_build(kind={kind!r})")
+        raise FileNotFoundError(
+            f"{output} missing — run cv.robust_build(kind={kind!r}"
+            + (f", fold_seed={fold_seed}" if fold_seed is not None else "")
+            + ")"
+        )
     return pd.read_parquet(output)

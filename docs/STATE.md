@@ -222,11 +222,16 @@ at that level, which is what the ~40-unit `annotate.moves` plan actually depends
 > A transcript-only diagnostic submission — previously step 1 here — is **no longer worth a
 > slot**: §1 of ENDGAME.md answers it offline.
 
-1. `evaluate.by_objective_fold` — within-fold AUROC harness. Everything depends on it.
-2. Re-score **all** existing OOF under it, including the rejected `bge_attention` and
-   ModernBERT pilots. They were rejected on a metric that does not measure test performance.
-3. `features.lo_semantic_difficulty` — LO text → difficulty for unseen objectives (+0.007 AUROC).
-4. Neural transcript model, response-level, retrieval-selected windows (ENDGAME.md §3 Phase 1).
+1. ✅ `evaluate.by_objective_fold` — within-fold AUROC harness. Everything depends on it.
+   Best *honest* model projects to 0.6117 vs our real 0.6106; the projection is sound.
+2. ✅ `evaluate.objective_repeated` + `evaluate.objective_noise_floor` — the promotion gate.
+   **The objective-fold paired SD is ~0.037, ~70× the session-CV noise floor.**
+3. ❌ `features/lo_difficulty.py` — built, measured, **rejected**: −0.00478 ± 0.00577 AUROC over
+   5 fold assignments, positive in 1/5. The +0.0105 single-assignment reading was noise.
+   `include_lo_text_difficulty` defaults False; nothing ships. See ENDGAME.md §2a.
+4. ⬅️ **NEXT: `model.transcript_encoder`** — response-level, retrieval-selected windows, dialogue
+   only (ENDGAME.md §3 Phase 1). L4 smoke → A100 fold 0 (gate: AUROC ≥ 0.60) → 5 folds.
+   All of the remaining distance has to come from here.
 5. Move taxonomy via local vLLM — contingent on step 4, and the write-up centrepiece regardless.
 6. **A100 timing validation (~4 units)** only immediately before a real submission.
 7. Tuning the existing tree is **not** a next action — a capacity sweep showed the plateau.

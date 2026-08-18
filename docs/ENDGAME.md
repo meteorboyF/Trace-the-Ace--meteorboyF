@@ -112,10 +112,10 @@ held-out fold and averaged over 3×5 folds):
 | signal | AUC on held-out objectives |
 |---|---|
 | per-LO empirical lookup, objectives **seen** (our CV regime) | **0.706** |
-| per-LO empirical lookup, objectives **unseen** (the test regime) | **≈0.50** |
-| LO *text* → difficulty (TF-IDF + logistic) | 0.575 ± 0.065 |
+| per-LO empirical lookup, objectives **unseen** (the test regime) | **0.500** |
+| LO *text* → difficulty (TF-IDF + logistic), standalone | 0.575 ± 0.065 |
 | transcript-only model | 0.6055 ± 0.012 |
-| **transcript + LO-text difficulty, blended** | **0.6124 ± 0.056** |
+| transcript + LO-text difficulty | 0.6124 ± 0.056 → **see §2a: this did not replicate** |
 
 ⚠️ **Methodological trap, recorded because we fell into it.** Pooling predictions across
 objective-grouped folds and scoring AUC once is invalid — the folds have different base
@@ -136,6 +136,42 @@ assets. Re-scoring them is nearly free and happens first.
 
 ---
 
+## 2a. The objective-fold noise floor, and the first thing it killed
+
+Built and measured 2026-08-18. Everything above in §2 came from a **single** objective-fold
+assignment, and objective folds turn out to be far noisier than session folds — each holds only
+~80 of 398 objectives, and objective difficulty is lumpy.
+
+`features/lo_difficulty.py` was written to exploit the 0.575 standalone signal: fold-safe
+objective-text → difficulty, wired into `model.gbdt` as `include_lo_text_difficulty`. On the
+canonical fold assignment it measured **+0.0105 AUROC** — a headline gain, bigger than any
+feature block we have.
+
+Repeated across five assignments by `evaluate.objective_repeated`:
+
+| fold assignment | 11 | 23 | 37 | 41 | 59 |
+|---|---|---|---|---|---|
+| paired ΔAUROC | −0.0055 | −0.0181 | **+0.0149** | −0.0142 | −0.0011 |
+
+> **−0.00478 ± 0.00577, positive in 1/5. ❌ Rejected.** The single-assignment gain was noise and
+> the sign flipped. `include_lo_text_difficulty` defaults to `False`; nothing ships.
+
+**Two consequences, and the second matters more than the feature.**
+
+1. Objective descriptions carry standalone signal (0.575) that is nonetheless **redundant with
+   what the transcript already provides**. That is a clean, quantified statement about the
+   organisers' anti-goal, and it belongs in the write-up as a negative result.
+2. **The paired SD across single assignments is ~0.037 — roughly 70× the session-CV noise floor
+   of 5e-4.** No objective-fold A/B below ~0.01 AUROC means anything on one assignment. Every
+   decision from here, including the expensive GPU ones, goes through
+   `evaluate.objective_repeated`; `evaluate.objective_noise_floor` runs the same harness with
+   identical arms to calibrate what zero looks like.
+
+This is the fourteenth time a headline number in this project has come apart under a proper
+error bar. The harness now exists so it is the last.
+
+---
+
 ## 3. Plan
 
 Governing rule for the next nine days: **`robust_cv` objective-purged folds, AUROC averaged
@@ -146,16 +182,22 @@ demoted to a regression guard. Every experiment reports projected LB via
 Budget posture inverts: ~729 units for 9 days is **~60 A100-hours**. Hoarding units was
 correct in week 1 and is now the main risk. Spend.
 
-### Phase 0 — today, CPU, ~0 units
-1. `evaluate.by_objective_fold` — a single harness that scores any OOF parquet under
-   objective-purged folds with within-fold AUROC. Everything else depends on it.
-2. Re-score every existing OOF under it: `model_gbdt`, `bge_attention`, the ModernBERT pilot,
-   all six ablation blocks. **Expect the block ranking to change completely.** The
-   `interpret.ablation_repeated` verdicts in FINDINGS.md are measured on the wrong metric and
-   are not evidence for deployment decisions.
-3. `features.lo_semantic_difficulty` — LO text → difficulty, fitted fold-safely, replacing the
-   lookup's fallback-to-global-prior behaviour on unseen objectives. Worth ≈ +0.007 AUROC
-   ≈ −0.002 LB. Cheap and bankable.
+### Phase 0 — ✅ done 2026-08-18, CPU, 0 units
+1. ✅ `evaluate.by_objective_fold` — scores any OOF parquet under objective-purged folds with
+   within-fold AUROC and a projected LB. Rows are labelled `honest` (trained objective-disjoint)
+   or `optimistic`; the summary headlines the best **honest** row, because an optimistic one tops
+   the table at 0.72 while being worth 0.60 on the leaderboard.
+2. ✅ Re-scored every OOF on disk. The only honestly-trained model projects to **0.6117** against
+   our real **0.6106** — the projection is sound, and the ranking of everything else changed.
+   The `interpret.ablation_repeated` verdicts in FINDINGS.md are measured on the wrong metric and
+   are **not** evidence for deployment decisions.
+3. ✅ `features/lo_difficulty.py` built, measured, and **rejected** — see §2a. The expected
+   −0.002 LB gain does not exist. Its real yield was the noise floor it exposed.
+4. ✅ `evaluate.objective_repeated` / `evaluate.objective_noise_floor` — the promotion gate that
+   every subsequent A/B, including the encoder, has to pass.
+
+**Net effect on the leaderboard: zero.** The cheap win was not real. All of the remaining
+distance has to come from Phase 1, which was always where the 93% lived.
 
 ### Phase 1 — days 1–4, the neural transcript model (the actual bet)
 This is where +0.02–0.035 AUROC has to come from. Hand-crafted lexical features on ASR text
@@ -221,10 +263,13 @@ rolling or calendar before spending one** — it changes the whole schedule.
 
 | # | when | payload | purpose |
 |---|---|---|---|
-| 1 | now | GBDT + `lo_semantic_difficulty`, no recentring | bank ≈0.607; confirms §2 on the real test set |
+| ~~1~~ | ~~now~~ | ~~GBDT + LO-text difficulty~~ | **cancelled** — the feature was rejected (§2a); nothing to bank |
 | 2 | ~Aug 22 | + neural transcript model, blended | the bet |
 | 3 | ~Aug 25 | + Phase 2 features / better neural | refinement |
 | 4 | Aug 27 | best OOF configuration + half recentring | final |
+
+Phase 0 produced no shippable gain, so there is now **nothing worth spending a slot on until the
+encoder lands**. That is a better position than spending one to find out.
 
 **Hold one slot for Aug 27 unconditionally.** Do not spend a slot on a diagnostic that
 offline analysis can answer — §1 answered the transcript-only question without one.
@@ -239,10 +284,14 @@ right, and they speak directly to two of the four scoring criteria:
 - **Relevance / Rigor.** "Leaderboard log loss in this task is a monotone function of AUROC
   with a constant of 0.6238; calibration effort is wasted" is actionable guidance for other
   researchers, derived rather than asserted.
-- **Generalizability.** "Per-objective difficulty lookups score 0.706 AUC on seen objectives
-  and 0.50 on unseen ones; objective *text* recovers 0.575" is a precise, quantified statement
-  of what transfers to a new tutoring deployment and what does not — the organisers' stated
-  anti-goal, measured instead of assumed.
+- **Generalizability.** "Per-objective difficulty lookups score 0.706 AUC on seen objectives and
+  0.500 on unseen ones; objective *text* recovers 0.575 standalone but adds **nothing** on top of
+  dialogue (−0.005 ± 0.006 over five fold assignments)" is a precise, quantified statement of what
+  transfers to a new tutoring deployment and what does not — the organisers' stated anti-goal,
+  measured instead of assumed, with the null result intact.
+- **Rigor.** The objective-fold noise floor (paired SD ~0.037, ~70× the session-CV floor) is
+  itself a methodological finding: papers reporting held-out-topic results on a single split are
+  reporting noise, and we can show the effect size at which that starts to matter.
 - **Negative results.** Deployment shrinkage (ADR-017) was falsified by the leaderboard *and*
   is now explained: the model was already optimally calibrated (w\* = 1.0).
 

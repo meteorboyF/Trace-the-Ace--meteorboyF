@@ -24,6 +24,7 @@ import pandas as pd
 from ..cv import load_folds
 from ..evaluate import experiment_dir, save_oof, score_frame
 from ..features.assemble import DEFAULT_BLOCKS, build_matrix, summarize
+from ..features.lo_difficulty import LO_TEXT_ENC_COL, fold_safe_lo_text_difficulty
 from ..io import LABEL_COL, load_train_features, write_parquet
 from ..logging_utils import get_logger
 from ..paths import runs_dir
@@ -191,10 +192,12 @@ def train(
     params: dict[str, Any] | None = None,
     seed: int | None = None,
     include_lo_prior: bool = True,
+    include_lo_text_difficulty: bool = False,
     lo_smoothing: float = 20.0,
     cv_seed: int | None = None,
     content_pca_components: int = 48,
     split_mode: str = "session",
+    fold_seed: int | None = None,
 ) -> dict[str, Any]:
     import lightgbm as lgb
 
@@ -211,16 +214,15 @@ def train(
             raise ValueError("robust folds are fixed; cv_seed is only valid for session folds")
         from ..robust_cv import load_robust_folds
 
-        folds = load_robust_folds(split_mode, subsample=subsample)
+        folds = load_robust_folds(split_mode, subsample=subsample, fold_seed=fold_seed)
         folds = folds[["response_id", "session_id", LABEL_COL, "fold"]].copy()
     else:
         raise ValueError("split_mode must be 'session', 'objective', or 'domain'")
     feats = load_train_features()
-    base = folds.merge(
-        feats[["response_id", "session_id", "learning_objective_id"]],
-        on=["response_id", "session_id"],
-        how="left",
-    )
+    lo_cols = ["response_id", "session_id", "learning_objective_id"]
+    if include_lo_text_difficulty:
+        lo_cols.append("learning_objective")
+    base = folds.merge(feats[lo_cols], on=["response_id", "session_id"], how="left")
     frame, feat_cols = build_matrix(base, blocks=blocks, subsample=subsample)
     if not feat_cols:
         raise RuntimeError("no numeric features assembled — did the feature tasks run?")
@@ -238,22 +240,36 @@ def train(
             "objective-disjoint GBDT currently supports transcript-only evaluation; "
             "a fold-safe support-aware prior must be implemented before enabling LO targets"
         )
+    # lo_text_difficulty is the exception: it is a function of the objective *description*,
+    # so it stays meaningful — and measurable — precisely when the objective is unseen. That
+    # is the whole point of it, so it is allowed under objective-disjoint splits.
+    include_lo_text_difficulty = bool(
+        include_lo_text_difficulty and {LO_COL, "learning_objective"} <= set(frame.columns)
+    )
     base_feat_cols = list(feat_cols)
     content_raw_cols = [c for c in base_feat_cols if c.startswith("cont_raw_")]
     ordinary_cols = [c for c in base_feat_cols if c not in content_raw_cols]
     content_k = min(int(content_pca_components), len(content_raw_cols)) if content_raw_cols else 0
     content_cols = [f"cont_{i:02d}" for i in range(content_k)]
     model_base_cols = [*ordinary_cols, *content_cols]
-    feat_cols = [*model_base_cols, LO_ENC_COL] if include_lo_prior else list(model_base_cols)
+    feat_cols = list(model_base_cols)
+    if include_lo_prior:
+        feat_cols.append(LO_ENC_COL)
+    if include_lo_text_difficulty:
+        feat_cols.append(LO_TEXT_ENC_COL)
 
     feature_summary = summarize(frame, ordinary_cols)
     if content_cols:
         feature_summary["n_features"] += len(content_cols)
         feature_summary["features_by_block"]["content"] = len(content_cols)
-    if include_lo_prior:
-        feature_summary["n_features"] += 1
-        by_block = feature_summary["features_by_block"]
-        by_block["lo_prior"] = by_block.get("lo_prior", 0) + 1
+    for flag, block in (
+        (include_lo_prior, "lo_prior"),
+        (include_lo_text_difficulty, "lo_text_difficulty"),
+    ):
+        if flag:
+            feature_summary["n_features"] += 1
+            by_block = feature_summary["features_by_block"]
+            by_block[block] = by_block.get(block, 0) + 1
     log.info("gbdt: %s", feature_summary)
 
     X_base = frame[base_feat_cols]
@@ -270,6 +286,7 @@ def train(
     best_iters: list[int] = []
     boosters: list[Any] = []
     fold_lo_priors: list[dict[str, Any]] = []
+    fold_lo_text_models: list[tuple[int, Any]] = []
     fold_ids = sorted(frame["fold"].unique())
 
     for k in pbar(fold_ids, desc="model.gbdt folds", unit="fold"):
@@ -299,6 +316,14 @@ def train(
                     "values": {str(key): float(value) for key, value in outer_map.items()},
                 }
             )
+        if include_lo_text_difficulty:
+            # Fitted on this fold's training rows only; training rows themselves get an
+            # inner objective-grouped OOF estimate. See features/lo_difficulty.py.
+            values, text_model = fold_safe_lo_text_difficulty(
+                frame, tr.to_numpy(), va.to_numpy(), seed
+            )
+            X[LO_TEXT_ENC_COL] = values
+            fold_lo_text_models.append((int(k), text_model))
         dtrain = lgb.Dataset(X[tr], label=y[tr.to_numpy()], free_raw_data=False)
         dvalid = lgb.Dataset(X[va], label=y[va.to_numpy()], reference=dtrain, free_raw_data=False)
 
@@ -366,6 +391,15 @@ def train(
             tmp.write_text(json.dumps(spec, sort_keys=True))
             temp_paths.append((tmp, mdir / f"lo_prior_fold{k}.json"))
 
+        # The text->difficulty models must be replayable at inference, so persist the fitted
+        # vectorizer and classifier per fold alongside the boosters they were trained with.
+        for k, text_model in fold_lo_text_models:
+            import joblib
+
+            tmp = mdir / f".lo_text_fold{k}.joblib.tmp"
+            joblib.dump(text_model, tmp)
+            temp_paths.append((tmp, mdir / f"lo_text_fold{k}.joblib"))
+
         model_manifest = {
             "experiment": experiment,
             "subsample": subsample,
@@ -376,10 +410,12 @@ def train(
             "params": p,
             "seed": seed,
             "include_lo_prior": include_lo_prior,
+            "include_lo_text_difficulty": include_lo_text_difficulty,
             "lo_smoothing": lo_smoothing,
             "num_boost_round": num_boost_round,
             "early_stopping_rounds": early_stopping_rounds,
             "split_mode": split_mode,
+            "fold_seed": fold_seed,
         }
         manifest_tmp = mdir / ".training_manifest.json.tmp"
         manifest_tmp.write_text(json.dumps(model_manifest, indent=2, default=str))
@@ -390,6 +426,7 @@ def train(
         for old in [
             *mdir.glob("fold*.txt"),
             *mdir.glob("lo_prior_fold*.json"),
+            *mdir.glob("lo_text_fold*.joblib"),
             mdir / "importance.parquet",
             mdir / "feature_order.json",
             mdir / "training_manifest.json",
@@ -415,8 +452,26 @@ def train(
             "importance_path": str(imp_path),
             "top_features": imp_summary.head(15)["feature"].tolist(),
             "split_mode": split_mode,
+            "include_lo_prior": include_lo_prior,
+            "include_lo_text_difficulty": include_lo_text_difficulty,
         }
     )
+    if split_mode == "objective":
+        # Under objective folds the pooled AUC in `res` is contaminated: folds differ in base
+        # rate, so a constant predictor scores ~0.457 rather than 0.500. Report the within-fold
+        # figure, which is the one that tracks the leaderboard.
+        from ..objective_eval import projected_lb, within_fold_auc
+
+        mean_auc, sd_auc, per_fold, _ = within_fold_auc(frame)
+        res.update(
+            {
+                "within_objective_fold_auc": round(mean_auc, 5),
+                "within_objective_fold_auc_sd": round(sd_auc, 5),
+                "per_fold_auc": {k: round(v, 5) for k, v in sorted(per_fold.items())},
+                "projected_lb_logloss": round(projected_lb(mean_auc), 5),
+                "pooled_auc_is_contaminated": True,
+            }
+        )
     if split_mode != "session":
         # Ordinary baseline OOF uses different training partitions and is not a valid
         # comparator for a robust-fold model, even though the response cohort matches.
