@@ -203,9 +203,27 @@ def _fmt_eta(seconds: float | None) -> str:
 
 
 def _maybe_shutdown() -> None:
-    """Best-effort stop of the Colab runtime so an idle GPU stops billing."""
+    """Sync results to Drive, then stop the Colab runtime so an idle GPU stops billing.
+
+    The sync is NOT optional. ``unassign()`` destroys the runtime's local SSD, which is
+    where every artifact lives — without the sync, an overnight ``shutdown_after=True``
+    training run would delete its own results the moment it finished. If the sync fails,
+    the runtime is deliberately left RUNNING (billing and all): a few units of idle GPU
+    are recoverable, vanished results are not.
+    """
     try:
-        log.warning("shutdown_after=True -> terminating runtime to stop billing.")
+        from .maintenance import sync_artifacts  # noqa: PLC0415
+
+        log.warning("shutdown_after=True -> syncing artifacts to Drive before shutdown.")
+        sync_artifacts()
+    except Exception:
+        log.exception(
+            "ARTIFACT SYNC FAILED — leaving the runtime attached so results are not lost. "
+            "Run maintenance.sync_artifacts manually, then disconnect."
+        )
+        return
+    try:
+        log.warning("sync complete -> terminating runtime to stop billing.")
         from google.colab import runtime as colab_runtime  # noqa: PLC0415
 
         colab_runtime.unassign()

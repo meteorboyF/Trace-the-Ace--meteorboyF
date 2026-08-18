@@ -476,6 +476,7 @@ def _train_one_fold(
 
     best_auc = -1.0
     best_predictions: pd.DataFrame | None = None
+    best_state: dict[str, Any] | None = None
     history: list[dict[str, float]] = []
 
     for epoch in range(1, cfg.epochs + 1):
@@ -523,8 +524,17 @@ def _train_one_fold(
             best_predictions = pd.DataFrame(
                 {"response_id": ids, LABEL_COL: y_true, "pred": y_pred, "fold": fold}
             )
+            # Snapshot the best-epoch weights (CPU, fp16 for floats only — halving integer
+            # buffers corrupts them). Without this the submission would have to RETRAIN:
+            # predictions alone cannot be packaged.
+            best_state = {
+                key: value.detach()
+                .to("cpu", dtype=torch.float16 if value.is_floating_point() else value.dtype)
+                .clone()
+                for key, value in model.state_dict().items()
+            }
 
-    if best_predictions is None:
+    if best_predictions is None or best_state is None:
         raise RuntimeError(f"fold {fold} produced no predictions")
 
     # Written as soon as the fold finishes so a Colab disconnect costs one fold, not a run.
@@ -532,6 +542,10 @@ def _train_one_fold(
     # untrusted by the assembly guard, so the write order fails safe.
     _fold_config_path(directory, fold).write_text(
         json.dumps(_fold_provenance(cfg, split_mode, fold_seed), sort_keys=True)
+    )
+    torch.save(
+        {"state_dict": best_state, "valid_auc": best_auc},
+        directory / f"fold{fold}_model.pt",
     )
     write_parquet(best_predictions, _fold_pred_path(directory, fold))
     del model
@@ -627,7 +641,24 @@ def train(
         for fold in pending:
             with heartbeat(f"encoder fold {fold}"):
                 fold_results.append(
-                    _train_one_fold(examples, fold, cfg, split_mode, subsample, seed, directory)
+                    _train_one_fold(
+                        examples, fold, cfg, split_mode, subsample, seed, directory, fold_seed
+                    )
+                )
+            # Checkpoint to Drive after EVERY fold. The runtime's local SSD does not
+            # survive a disconnect, so without this a drop at fold 4 of 5 loses ~24 units
+            # of finished training. Best-effort: a sync failure (e.g. running locally with
+            # no Drive) must not kill a training run that is otherwise succeeding.
+            try:
+                from ..maintenance import sync_artifacts
+
+                with heartbeat(f"encoder fold {fold}: sync to Drive"):
+                    sync_artifacts()
+            except Exception as exc:
+                log.warning(
+                    "per-fold Drive sync failed (%s) — training continues, but a "
+                    "disconnect now loses every unsynced fold. If on Colab, investigate.",
+                    exc,
                 )
 
     # --- assemble the OOF once every fold is present --------------------------------
