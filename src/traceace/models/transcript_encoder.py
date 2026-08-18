@@ -418,6 +418,11 @@ def _train_one_fold(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
+    if tokenizer.pad_token is None:
+        # Decoder backbones (Qwen et al.) ship without a pad token; padding batches would
+        # crash. EOS-as-pad is safe here because the attention mask excludes pad positions
+        # from the mean-pool.
+        tokenizer.pad_token = tokenizer.eos_token
     base_rate = float(train_df[LABEL_COL].mean())
     model = build_model(cfg, base_rate).to(device)
 
