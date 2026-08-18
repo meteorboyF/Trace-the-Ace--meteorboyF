@@ -203,10 +203,15 @@ def by_objective_fold(
     from .evaluate import list_oof
 
     if experiments is None:
+        # rep.* are per-assignment arms written by evaluate.objective_repeated — harness
+        # internals, not candidates — and there are dozens of them after one A/B run.
         names = [
             n
             for n in list_oof()
-            if "__sub" not in n and "__cv" not in n and not n.startswith("abl.")
+            if "__sub" not in n
+            and "__cv" not in n
+            and not n.startswith("abl.")
+            and not n.startswith("rep.")
         ]
     else:
         names = list(experiments)

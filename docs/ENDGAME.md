@@ -199,6 +199,50 @@ correct in week 1 and is now the main risk. Spend.
 **Net effect on the leaderboard: zero.** The cheap win was not real. All of the remaining
 distance has to come from Phase 1, which was always where the 93% lived.
 
+### Phase 0.5 — pipeline audit, 2026-08-18 second pass
+
+A line-level audit of everything the GPU cells execute, before any unit is spent. Six defects
+found and fixed; numbering continues the silent-correctness series:
+
+1. **(14th defect, parity class)** `build_examples` read transcripts **without**
+   `normalize_frame`, while every feature block and the submission path normalize (which
+   *re-sorts* rows by `utterance_idx, t_seconds`). Window spans would have indexed
+   differently-ordered rows — the encoder trained on different text than inference selects.
+   Same class as ADR-013. Fixed: the encoder now normalizes through the shared
+   `inference_lib` implementation.
+2. **Smoke cell crashed on a fresh GPU runtime.** Fold tables are built by CPU-guarded tasks
+   the tier guard refuses on an attached GPU. `_ensure_folds` now builds missing tables
+   inline (~1s; the guard exists to stop wasted hours, not seconds).
+3. **A guard that fired on the wrong condition.** The "must not run in submission mode" check
+   keyed on progress bars being disabled — a legitimate state in any nohup/background run.
+   Found by *executing* the training loop on CPU, not by reading it. Removed: `main.py`
+   never imports training code, so the guard protected nothing.
+4. **Mixed-config OOF assembly.** An aborted run's folds plus a re-run under different
+   settings would assemble into an "OOF" of a model that does not exist. Every fold now
+   writes a config sidecar; assembly refuses on any mismatch.
+5. **Blend regime mismatch — the #45 mistake, re-armed.** Blending the session-trained GBDT
+   OOF (AUC 0.72 via memorized objective difficulty) with the honest encoder OOF lets the
+   weight optimizer load onto phantom signal. `ensemble.blend` now records
+   `input_split_modes`, warns loudly on mixtures, and writes a manifest so
+   `evaluate.by_objective_fold` labels blends honestly. The notebook blends the encoder with
+   an **honest GBDT twin** (`model.gbdt_objective`) instead of the shipped model.
+6. Smaller: transformers scheduler import replaced with plain torch (survives a Transformers
+   major bump on Colab); `gradient_checkpointing` flag added (L4 24GB does not reliably fit
+   batch 8 × 2048 tokens without it); DataLoader workers so tokenization doesn't starve the
+   A100; the diagnosis sweep excludes `rep.*` harness artifacts.
+
+The full training loop was then **executed end-to-end on CPU** with a cached 33M-param
+backbone (BGE-small standing in for ModernBERT) — 5 folds, OOF assembly, provenance guard —
+so the first GPU run exercises code that has already run, not code that has only been read.
+
+**⚠️ The one critical gap that remains open: `submission.build` has no encoder path.** The
+retrieval side is already shipped (`main.py` computes `topk_spans` + `frame_from_spans` with
+the trained vectorizer), so the missing piece is: vendor tokenizer + fold weights into
+`assets/`, render `render_windows(sub)` per response, batch-forward through torch, average
+fold sigmoids, blend with the GBDT logit at the honest weight. **This must be built and
+verified before submission slot 2 (~Aug 22)** — it is CPU work and can proceed in parallel
+with the encoder's GPU runs, but a winning encoder that cannot be packaged is worth nothing.
+
 ### Phase 1 — days 1–4, the neural transcript model (the actual bet)
 This is where +0.02–0.035 AUROC has to come from. Hand-crafted lexical features on ASR text
 have plateaued at 0.606 and the leaders' 0.63–0.64 AUROC is what a competent transformer

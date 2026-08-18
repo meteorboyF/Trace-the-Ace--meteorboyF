@@ -52,8 +52,8 @@ from ..cv import load_folds
 from ..evaluate import experiment_dir, experiment_name, save_oof, score_frame
 from ..io import LABEL_COL, load_train_features, read_transcript, write_parquet
 from ..logging_utils import get_logger
-from ..packaging.inference_lib import frame_from_spans, topk_spans
-from ..progress import heartbeat, pbar, progress_enabled
+from ..packaging.inference_lib import frame_from_spans, normalize_frame, topk_spans
+from ..progress import heartbeat, pbar
 from ..robust_cv import load_robust_folds, purged_split_indices
 from ..tasks import task
 
@@ -105,6 +105,10 @@ class EncoderConfig:
     warmup_frac: float = 0.1
     dropout: float = 0.1
     max_grad_norm: float = 1.0
+    # Trades ~30% speed for ~halved activation memory. Required on L4 (24 GB) at this
+    # sequence length; leave False on the A100, where the full batch fits comfortably.
+    gradient_checkpointing: bool = False
+    num_workers: int = 2
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
@@ -143,7 +147,12 @@ def build_examples(feats: pd.DataFrame, topk_windows: int, include_objective: bo
         list(feats.groupby("session_id")), desc="encoder: build examples", unit="session"
     ):
         try:
-            transcript = read_transcript(str(session_id))
+            # normalize_frame re-sorts by (utterance_idx, t_seconds) — the SAME canonical
+            # order every feature block and the submission path use. Skipping it here would
+            # make window spans index differently-ordered rows, so the encoder would train
+            # on different text than inference selects. That is the parity class that broke
+            # submission #1 (ADR-013), and it must go through the shared implementation.
+            transcript = normalize_frame(read_transcript(str(session_id)))
         except (FileNotFoundError, OSError, ValueError):
             missing += len(group)
             continue
@@ -239,6 +248,10 @@ def build_model(cfg: EncoderConfig, base_rate: float):
         def __init__(self) -> None:
             super().__init__()
             self.encoder = AutoModel.from_pretrained(cfg.model_name, attn_implementation="sdpa")
+            if cfg.gradient_checkpointing and hasattr(
+                self.encoder, "gradient_checkpointing_enable"
+            ):
+                self.encoder.gradient_checkpointing_enable()
             hidden = int(self.encoder.config.hidden_size)
             self.dropout = torch.nn.Dropout(cfg.dropout)
             self.head = torch.nn.Linear(hidden, 1)
@@ -264,6 +277,34 @@ def _seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
+
+
+def _ensure_folds(split_mode: str, subsample: int | None, fold_seed: int | None) -> None:
+    """Build any missing fold table before training starts.
+
+    A fresh GPU runtime has no fold tables, and ``cv.build`` / ``cv.robust_build`` are
+    CPU-guarded tasks the tier guard would refuse on an attached L4/A100 — so without this,
+    the very first GPU cell dies on FileNotFoundError after the operator already paid to
+    attach the accelerator. Building folds takes ~1s; the underlying builder functions are
+    called directly (not through ``tasks.run``) precisely because the guard is about wasted
+    hours, not wasted seconds.
+    """
+    if split_mode == "session":
+        try:
+            load_folds(subsample=subsample)
+        except FileNotFoundError:
+            from ..cv import build as build_session_folds
+
+            log.info("encoder: session folds missing (subsample=%s); building", subsample)
+            build_session_folds(subsample=subsample)
+    else:
+        try:
+            load_robust_folds(split_mode, subsample=subsample, fold_seed=fold_seed)
+        except FileNotFoundError:
+            from ..robust_cv import build as build_robust_folds
+
+            log.info("encoder: %s folds missing; building", split_mode)
+            build_robust_folds(kind=split_mode, subsample=subsample, fold_seed=fold_seed)
 
 
 def _fold_partition(
@@ -317,6 +358,40 @@ def _fold_pred_path(directory: Any, fold: int):
     return directory / f"fold{fold}_predictions.parquet"
 
 
+def _fold_config_path(directory: Any, fold: int):
+    return directory / f"fold{fold}_config.json"
+
+
+def _fold_provenance(cfg: EncoderConfig, split_mode: str, fold_seed: int | None) -> dict[str, Any]:
+    """Everything that makes two folds' predictions comparable."""
+    return {"config": cfg.to_dict(), "split_mode": split_mode, "fold_seed": fold_seed}
+
+
+def _check_fold_provenance(directory: Any, folds: list[int], expected: dict[str, Any]) -> None:
+    """Refuse to assemble an OOF out of folds trained under different configurations.
+
+    The failure this prevents: an aborted run leaves folds 0–2 trained at one setting, a
+    later run finishes 3–4 at another, and the assembled "OOF" silently mixes two models.
+    Every downstream number — the gate, the blend weights, the projection — would then
+    describe a model that does not exist.
+    """
+    for fold in folds:
+        path = _fold_config_path(directory, fold)
+        if not path.is_file():
+            raise RuntimeError(
+                f"fold {fold} has predictions but no config sidecar ({path.name}). It predates "
+                "provenance tracking or was copied by hand — retrain it with force=True."
+            )
+        found = json.loads(path.read_text())
+        if found != expected:
+            raise RuntimeError(
+                f"fold {fold} was trained under a different configuration than this run.\n"
+                f"  on disk: {found}\n  this run: {expected}\n"
+                "Retrain with force=True (or move the old experiment aside) — assembling "
+                "mixed-config folds would produce an OOF of a model that does not exist."
+            )
+
+
 def _train_one_fold(
     examples: pd.DataFrame,
     fold: int,
@@ -331,7 +406,7 @@ def _train_one_fold(
     import torch
     from sklearn.metrics import roc_auc_score
     from torch.utils.data import DataLoader
-    from transformers import AutoTokenizer, get_linear_schedule_with_warmup
+    from transformers import AutoTokenizer
 
     _seed_everything(seed + fold)
     train_df, valid_df = _fold_partition(examples, split_mode, fold, subsample, fold_seed)
@@ -352,18 +427,27 @@ def _train_one_fold(
     # `_Dataset` is a plain class rather than a torch.utils.data.Dataset subclass so this
     # module imports without torch installed (the CPU dev environment, and every unit test
     # that only exercises example construction). DataLoader only needs __len__/__getitem__.
+    # Tokenization happens in the collate, so worker processes keep the GPU fed; on CPU
+    # (unit tests, local sanity runs) workers cost more than they save.
+    loader_kw: dict[str, Any] = (
+        {"num_workers": cfg.num_workers, "pin_memory": True, "persistent_workers": True}
+        if device.type == "cuda" and cfg.num_workers > 0
+        else {}
+    )
     train_loader: Any = DataLoader(
         _Dataset(train_df, tokenizer, cfg),  # type: ignore[arg-type]
         batch_size=cfg.batch_size,
         shuffle=True,
         collate_fn=collate,
         drop_last=True,
+        **loader_kw,
     )
     valid_loader: Any = DataLoader(
         _Dataset(valid_df, tokenizer, cfg),  # type: ignore[arg-type]
         batch_size=cfg.batch_size * 2,
         shuffle=False,
         collate_fn=collate,
+        **loader_kw,
     )
 
     head_params = [p for n, p in model.named_parameters() if n.startswith("head")]
@@ -377,9 +461,17 @@ def _train_one_fold(
     )
     steps_per_epoch = max(1, len(train_loader) // cfg.accumulation_steps)
     total_steps = max(1, steps_per_epoch * cfg.epochs)
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer, int(total_steps * cfg.warmup_frac), total_steps
-    )
+    warmup_steps = int(total_steps * cfg.warmup_frac)
+
+    def _linear_warmup(step: int) -> float:
+        # Plain linear warmup->decay in torch, deliberately NOT transformers'
+        # get_linear_schedule_with_warmup: this module must survive a Transformers major
+        # bump on Colab, and a scheduler is not worth an import dependency.
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+        return max(0.0, (total_steps - step) / max(1, total_steps - warmup_steps))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _linear_warmup)
     loss_fn = torch.nn.BCEWithLogitsLoss()
 
     best_auc = -1.0
@@ -436,6 +528,11 @@ def _train_one_fold(
         raise RuntimeError(f"fold {fold} produced no predictions")
 
     # Written as soon as the fold finishes so a Colab disconnect costs one fold, not a run.
+    # The config sidecar lands first: predictions without provenance are treated as
+    # untrusted by the assembly guard, so the write order fails safe.
+    _fold_config_path(directory, fold).write_text(
+        json.dumps(_fold_provenance(cfg, split_mode, fold_seed), sort_keys=True)
+    )
     write_parquet(best_predictions, _fold_pred_path(directory, fold))
     del model
     torch.cuda.empty_cache()
@@ -491,9 +588,6 @@ def train(
         )
     cfg = EncoderConfig(**{**EncoderConfig().to_dict(), **overrides})
 
-    if progress_enabled() is False:  # pragma: no cover - submission mode never trains
-        raise RuntimeError("model.transcript_encoder must not run in submission mode")
-
     feats = load_train_features()
     if subsample is not None:
         keep = feats["session_id"].drop_duplicates().head(max(1, subsample))
@@ -520,6 +614,7 @@ def train(
 
     fold_results: list[dict[str, Any]] = []
     if pending:
+        _ensure_folds(split_mode, subsample, fold_seed)
         with heartbeat("encoder: rendering examples"):
             examples = build_examples(feats, cfg.topk_windows, cfg.include_objective)
         examples = examples.merge(feats[["response_id", LABEL_COL]], on="response_id", how="inner")
@@ -574,6 +669,7 @@ def train(
         log.info("encoder: %s", result["status"])
         return result
 
+    _check_fold_provenance(directory, expected, _fold_provenance(cfg, split_mode, fold_seed))
     parts = [pd.read_parquet(_fold_pred_path(directory, f)) for f in expected]
     oof = pd.concat(parts, ignore_index=True)
     oof = oof.merge(feats[["response_id", "session_id"]], on="response_id", how="left")
@@ -582,22 +678,40 @@ def train(
     save_oof(experiment, oof, subsample=subsample)
 
     scored = score_frame(oof, experiment, subsample=subsample)
-    mean_auc, sd_auc, per_fold, _ = within_fold_auc(oof)
     result.update(scored)
-    result.update(
-        {
-            "status": "complete",
-            "within_objective_fold_auc": round(mean_auc, 5),
-            "within_objective_fold_auc_sd": round(sd_auc, 5),
-            "per_fold_auc": {k: round(v, 5) for k, v in sorted(per_fold.items())},
-            "projected_lb_logloss": round(projected_lb(mean_auc), 5),
-        }
-    )
-    log.info(
-        "encoder %s: within-fold AUC %.4f ± %.4f -> projected LB %.4f",
-        experiment,
-        mean_auc,
-        sd_auc,
-        result["projected_lb_logloss"],
-    )
+    result["status"] = "complete"
+
+    # The OOF's `fold` column is whatever regime trained it. Only objective folds admit the
+    # headline metric — a session-fold AUC labeled "within_objective_fold_auc" would be the
+    # exact metric confusion this project just spent a day purging.
+    if split_mode == "objective":
+        try:
+            mean_auc, sd_auc, per_fold, _ = within_fold_auc(oof)
+        except RuntimeError as exc:
+            # Folds under the AUC minimum (small subsamples). Everything is trained and the
+            # OOF is saved — crashing HERE would report a fully-successful run as a failure.
+            result["within_objective_fold_auc"] = None
+            result["within_objective_fold_auc_note"] = str(exc)
+        else:
+            result.update(
+                {
+                    "within_objective_fold_auc": round(mean_auc, 5),
+                    "within_objective_fold_auc_sd": round(sd_auc, 5),
+                    "per_fold_auc": {k: round(v, 5) for k, v in sorted(per_fold.items())},
+                    "projected_lb_logloss": round(projected_lb(mean_auc), 5),
+                }
+            )
+            log.info(
+                "encoder %s: within-fold AUC %.4f ± %.4f -> projected LB %.4f",
+                experiment,
+                mean_auc,
+                sd_auc,
+                result["projected_lb_logloss"],
+            )
+    else:
+        result["within_objective_fold_auc"] = None
+        result["within_objective_fold_auc_note"] = (
+            f"trained with split_mode={split_mode!r}; the objective metric requires "
+            "split_mode='objective' (score via evaluate.by_objective_fold for a triage bound)"
+        )
     return result

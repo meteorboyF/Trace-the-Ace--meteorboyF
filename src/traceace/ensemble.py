@@ -104,6 +104,22 @@ def blend(
     if len(experiments) == 0:
         raise RuntimeError("no OOF experiments to blend — train a model first")
 
+    # Blend weights are only as honest as the OOFs they are fitted on. An OOF trained on
+    # session folds carries memorized per-objective difficulty (AUC 0.72 in-CV, ~0.60 on
+    # the leaderboard); the optimizer will load weight onto that phantom signal and the
+    # blend will underuse everything that actually transfers. Mixing regimes is allowed —
+    # research needs it — but never silently.
+    from .objective_eval import _training_split_mode
+
+    split_modes = {e: _training_split_mode(e, subsample, None) for e in experiments}
+    if len(set(split_modes.values())) > 1:
+        log.warning(
+            "ensemble.blend: MIXED TRAINING REGIMES %s — weights fitted on this mixture "
+            "reward objective memorisation and will NOT transfer to the leaderboard. "
+            "For deployable weights, blend OOFs trained with split_mode='objective' only.",
+            split_modes,
+        )
+
     raw = {e: load_oof(e, subsample=subsample) for e in experiments}
     first = raw[experiments[0]].reset_index(drop=True)
     frames = {
@@ -129,6 +145,20 @@ def blend(
     mdir = experiment_dir(output_experiment, subsample)
     mdir.mkdir(parents=True, exist_ok=True)
     joblib.dump({"experiments": experiments, "weights": w.tolist()}, mdir / "weights.joblib")
+    # A blend inherits the training regime of its inputs, so evaluate.by_objective_fold can
+    # label it honestly. Any disagreement or unknown input demotes the whole blend: honest
+    # provenance has to be proven, never assumed.
+    modes = set(split_modes.values())
+    (mdir / "training_manifest.json").write_text(
+        json.dumps(
+            {
+                "experiment": output_experiment,
+                "split_mode": modes.pop() if len(modes) == 1 else "mixed",
+                "input_split_modes": split_modes,
+            },
+            indent=2,
+        )
+    )
 
     res = score_frame(out, output_experiment, subsample=subsample)
     res.update(
@@ -137,6 +167,8 @@ def blend(
             "weights": {e: float(wi) for e, wi in zip(experiments, w)},
             "individual_logloss": {e: logloss(y, preds[:, i]) for i, e in enumerate(experiments)},
             "n_common": len(first),
+            "input_split_modes": split_modes,
+            "regime_consistent": len(set(split_modes.values())) == 1,
         }
     )
     d = runs_dir() / "ensemble"
