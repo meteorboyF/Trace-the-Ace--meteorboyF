@@ -39,6 +39,10 @@ import os
 os.environ["TRACEACE_PROGRESS"] = "0"
 os.environ["TQDM_DISABLE"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# The container has no network. Make any accidental Hub access an immediate error instead
+# of a hang: every tokenizer/config/weight the encoder needs is vendored under assets/.
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import sys
 from pathlib import Path
@@ -82,6 +86,14 @@ def main() -> int:
     sparse_text_config = dict(bundle.get("sparse_text_config") or {})
     hybrid_promotion = bundle.get("hybrid_promotion")
     lo_prior_by_booster = list(bundle.get("lo_prior_by_booster", []))
+
+    # Neural transcript encoder: present only when submission.build vendored it.
+    ENCODER_DIR = ASSETS / "encoder"
+    encoder_spec = None
+    if ENCODER_DIR.is_dir():
+        import encoder_lib as elib
+
+        encoder_spec = elib.load_encoder_spec(ENCODER_DIR)
     log("assets loaded")
 
     sub_fmt = pd.read_csv(DATA / "submission_format.csv", dtype={"response_id": str})
@@ -178,6 +190,16 @@ def main() -> int:
             )
             feats["_lo_id"] = lo_id
             feats["_use_fallback"] = not transcript_ok
+            # The encoder reads its OWN top-k windows (its k differs from the feature
+            # blocks'), rendered by the same shared code training used. Empty string means
+            # "no transcript" — the encoder abstains and the row keeps the base prediction.
+            if encoder_spec is not None and transcript_ok:
+                enc_keep = ilib.topk_spans(
+                    lo_text, vectorizer, wm, spans, int(encoder_spec["topk_windows"])
+                )
+                feats["_enc_text"] = ilib.render_windows(ilib.frame_from_spans(tdf, enc_keep))
+            else:
+                feats["_enc_text"] = ""
             rows.append(feats)
     log("features extracted")
 
@@ -196,6 +218,7 @@ def main() -> int:
 
     lo_ids = X.pop("_lo_id").to_numpy() if "_lo_id" in X.columns else None
     text_documents = X.pop("_text_document").astype(str).tolist()
+    encoder_texts = X.pop("_enc_text").astype(str).tolist() if "_enc_text" in X.columns else None
     use_fallback = X.pop("_use_fallback").to_numpy(dtype=bool)
     ids = X.pop("response_id").to_numpy()
     for c in feature_cols:
@@ -243,6 +266,19 @@ def main() -> int:
     if calibrator is not None:
         # plain-number calibrator: pure arithmetic, no sklearn object to unpickle
         preds = ilib.apply_calibration(calibrator, preds, eps=EPS)
+
+    # ---- neural transcript encoder: fold-averaged, blended in logit space ----
+    # Deliberately NO try/except fallback: failed jobs do not count against the weekly
+    # submission limit, so a loud crash costs nothing, while silently shipping base-only
+    # predictions would waste a real slot on a model we did not intend to submit.
+    if encoder_spec is not None:
+        if encoder_texts is None:
+            raise RuntimeError("encoder assets present but no rendered texts were collected")
+        encoder_probs = elib.predict_probs(ENCODER_DIR, encoder_texts)
+        preds = elib.blend_with_base(
+            preds, encoder_probs, float(encoder_spec["blend_weight"]), eps=EPS
+        )
+        log("encoder blended")
 
     # Deployment shrinkage: the test regime is harder than the CV regime (unseen learning
     # objectives, multiple data sources), so the model is systematically overconfident.

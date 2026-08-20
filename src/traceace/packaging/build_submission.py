@@ -147,6 +147,93 @@ def _shrinkage(experiment: str) -> dict[str, float] | None:
     return dict(joblib.load(path))
 
 
+def _collect_encoder(experiment: str) -> tuple[dict[str, Any], list[Path]]:
+    """Validate the encoder experiment's artifacts and return (config, fold checkpoint paths).
+
+    Requirements are strict because a partial or mixed set of folds would package a model
+    that never existed: exactly ``n_splits`` checkpoints, every fold's config sidecar
+    byte-identical, and the training manifest present to supply the inference settings.
+
+    Unlike the GBDT collector this does NOT require session folds — the encoder's
+    production artifact is objective-disjoint by design; that is how it was validated.
+    """
+    cfg = get_config()
+    mdir = experiment_dir(experiment, None)
+    manifest_path = mdir / "training_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"{manifest_path} missing — has {experiment!r} trained?")
+    manifest = json.loads(manifest_path.read_text())
+    encoder_cfg = dict(manifest.get("config", {}))
+    required = {"model_name", "max_tokens", "topk_windows", "include_objective"}
+    if not required.issubset(encoder_cfg):
+        raise RuntimeError(f"{experiment!r} manifest lacks encoder config fields {required}")
+    if encoder_cfg.get("include_objective"):
+        raise RuntimeError(
+            "refusing to package an encoder trained WITH the objective text in its input: "
+            "that configuration memorises objective difficulty (the organisers' anti-goal) "
+            "and its validation numbers do not describe test behaviour"
+        )
+
+    n_folds = int(cfg.cv["n_splits"])
+    checkpoints = [mdir / f"fold{k}_model.pt" for k in range(n_folds)]
+    missing = [p.name for p in checkpoints if not p.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"encoder fold checkpoints missing {missing} under {mdir}; "
+            f"finish training {experiment!r} before packaging"
+        )
+    sidecars = [mdir / f"fold{k}_config.json" for k in range(n_folds)]
+    missing = [p.name for p in sidecars if not p.is_file()]
+    if missing:
+        raise FileNotFoundError(f"encoder fold config sidecars missing {missing} under {mdir}")
+    provenances = [json.loads(p.read_text()) for p in sidecars]
+    if any(prov != provenances[0] for prov in provenances[1:]):
+        raise RuntimeError(
+            f"encoder folds of {experiment!r} were trained under different configurations; "
+            "retrain as one complete generation before packaging"
+        )
+    if provenances[0].get("config") != encoder_cfg:
+        raise RuntimeError(
+            f"{experiment!r}: training manifest and fold sidecars disagree on the config; "
+            "the artifacts are from mixed generations"
+        )
+    return encoder_cfg, checkpoints
+
+
+def _vendor_encoder_assets(
+    staging: Path,
+    encoder_cfg: dict[str, Any],
+    checkpoints: list[Path],
+    blend_weight: float,
+) -> dict[str, Any]:
+    """Write tokenizer + config + fold weights + encoder.json under assets/encoder/.
+
+    The tokenizer and *architecture config* are vendored via ``save_pretrained`` so the
+    container never touches the Hub; every actual weight comes from our own fold
+    checkpoints (the state dicts are complete, embeddings included).
+    """
+    from transformers import AutoConfig, AutoTokenizer
+
+    encoder_dir = staging / "assets" / "encoder"
+    encoder_dir.mkdir(parents=True, exist_ok=True)
+
+    model_name = str(encoder_cfg["model_name"])
+    AutoTokenizer.from_pretrained(model_name).save_pretrained(encoder_dir / "tokenizer")
+    AutoConfig.from_pretrained(model_name).save_pretrained(encoder_dir / "config")
+    for k, src in enumerate(checkpoints):
+        shutil.copyfile(src, encoder_dir / f"fold{k}.pt")
+
+    spec = {
+        "model_name": model_name,
+        "max_tokens": int(encoder_cfg["max_tokens"]),
+        "topk_windows": int(encoder_cfg["topk_windows"]),
+        "blend_weight": float(blend_weight),
+        "n_folds": len(checkpoints),
+    }
+    (encoder_dir / "encoder.json").write_text(json.dumps(spec, indent=2))
+    return spec
+
+
 def _lo_prior(smoothing: float = 20.0) -> dict[str, float]:
     """Per-learning-objective smoothed correctness, for the unreadable-transcript path."""
     df = load_train()
@@ -171,7 +258,17 @@ def build(
     output_name: str = "submission.zip",
     blend_experiment: str | None = "ensemble.hybrid",
     apply_deployment_shrinkage: bool = False,
+    encoder_experiment: str | None = None,
+    encoder_weight: float | None = None,
 ) -> dict[str, Any]:
+    """Package the submission.
+
+    ``encoder_experiment`` + ``encoder_weight`` ship the neural transcript encoder alongside
+    the GBDT: fold weights are vendored under ``assets/encoder/`` and main.py blends the two
+    in logit space at ``encoder_weight``. The weight must be passed EXPLICITLY — it comes
+    from the honest objective-fold blend (evaluate.by_objective_fold on the blend OOF), and
+    baking in a default would let a stale number ship unnoticed.
+    """
     import joblib
 
     from ..features.lo_alignment import fit_lo_vectorizer
@@ -192,6 +289,24 @@ def build(
     shutil.copyfile(lib_src, staging / "inference_lib.py")
     sparse_lib_src = Path(__file__).resolve().parent / "sparse_text_lib.py"
     shutil.copyfile(sparse_lib_src, staging / "sparse_text_lib.py")
+
+    # --- neural transcript encoder (optional) --------------------------------
+    encoder_spec = None
+    if encoder_experiment is not None:
+        if encoder_weight is None:
+            raise ValueError(
+                "encoder_weight is required when packaging an encoder — pass the weight "
+                "measured by the honest objective-fold blend, never a default"
+            )
+        if not 0.0 < float(encoder_weight) <= 1.0:
+            raise ValueError(f"encoder_weight {encoder_weight} outside (0, 1]")
+        encoder_cfg, checkpoints = _collect_encoder(encoder_experiment)
+        with heartbeat("vendoring encoder assets"):
+            encoder_spec = _vendor_encoder_assets(
+                staging, encoder_cfg, checkpoints, float(encoder_weight)
+            )
+        encoder_lib_src = Path(__file__).resolve().parent / "encoder_lib.py"
+        shutil.copyfile(encoder_lib_src, staging / "encoder_lib.py")
 
     # --- model bundle -------------------------------------------------------
     boosters = _collect_boosters(experiment)
@@ -279,6 +394,8 @@ def build(
         "calibrator": (calibrator or {}).get("method", "none"),
         "hybrid": bool(promotion),
         "deployment_shrinkage": bool(apply_deployment_shrinkage),
+        "encoder": encoder_spec,  # None when no encoder is shipped
+        "encoder_experiment": encoder_experiment,
         "sklearn_build_version": __import__("sklearn").__version__,
         "seed": cfg.seed,
         "clip_eps": cfg.predict_clip_eps,

@@ -52,7 +52,12 @@ from ..cv import load_folds
 from ..evaluate import experiment_dir, experiment_name, save_oof, score_frame
 from ..io import LABEL_COL, load_train_features, read_transcript, write_parquet
 from ..logging_utils import get_logger
-from ..packaging.inference_lib import frame_from_spans, normalize_frame, topk_spans
+from ..packaging.inference_lib import (
+    frame_from_spans,
+    normalize_frame,
+    render_windows,
+    topk_spans,
+)
 from ..progress import heartbeat, pbar
 from ..robust_cv import load_robust_folds, purged_split_indices
 from ..tasks import task
@@ -85,8 +90,6 @@ DEFAULT_MODEL = "answerdotai/ModernBERT-base"
 DEFAULT_TOPK_WINDOWS = 4
 DEFAULT_MAX_TOKENS = 2048
 
-ROLE_PREFIX = {"tutor": "T:", "student": "S:", "background": "B:"}
-
 
 @dataclass
 class EncoderConfig:
@@ -112,23 +115,6 @@ class EncoderConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
-
-
-def render_windows(frame: pd.DataFrame) -> str:
-    """Role-tagged dialogue text for the selected windows.
-
-    Roles are abbreviated rather than spelled out because the tag is repeated once per
-    utterance and a 267-utterance session cannot afford five tokens of overhead each. The
-    ``background`` role is kept: it is a diarization-failure bucket containing real tutor
-    speech, and discarding it throws away teaching (docs/DATA.md).
-    """
-    roles = frame.get("role", pd.Series("", index=frame.index)).fillna("").astype(str)
-    content = frame.get("content", pd.Series("", index=frame.index)).fillna("").astype(str)
-    return "\n".join(
-        f"{ROLE_PREFIX.get(role, '?:')} {text}".strip()
-        for role, text in zip(roles, content)
-        if text.strip()
-    )
 
 
 def build_examples(feats: pd.DataFrame, topk_windows: int, include_objective: bool) -> pd.DataFrame:

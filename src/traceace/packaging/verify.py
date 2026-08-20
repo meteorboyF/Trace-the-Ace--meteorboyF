@@ -96,6 +96,11 @@ PREDICTION_CHECKS = (
     "feature_value_parity",
     "oof_replay_exact",
 )
+# Additionally required when the bundle ships the neural transcript encoder.
+ENCODER_CHECKS = (
+    "encoder_assets_complete",
+    "encoder_spec_valid",
+)
 
 MAX_ZIP_GB = 55.0
 MAX_PROJECTED_HOURS = 4.5
@@ -504,6 +509,60 @@ def verify_feature_value_parity(workdir: Path, result: VerifyResult) -> None:
         result.add("oof_replay_exact", False, "could not replay packaged held-out predictions")
 
 
+def verify_encoder_assets(workdir: Path, result: VerifyResult) -> bool:
+    """Structural checks on the vendored encoder. Returns whether an encoder is shipped.
+
+    Adds NO checks when there is no encoder directory — the expected-checks set is widened
+    only for bundles that actually ship one, so ``all_expected_checks_ran`` stays exact in
+    both configurations.
+    """
+    encoder_dir = workdir / "assets" / "encoder"
+    if not encoder_dir.is_dir():
+        return False
+
+    problems: list[str] = []
+    if not (workdir / "encoder_lib.py").is_file():
+        problems.append("encoder_lib.py missing from zip root")
+    tokenizer_dir = encoder_dir / "tokenizer"
+    if not tokenizer_dir.is_dir() or not any(tokenizer_dir.iterdir()):
+        problems.append("tokenizer/ missing or empty")
+    config_dir = encoder_dir / "config"
+    if not (config_dir / "config.json").is_file():
+        problems.append("config/config.json missing")
+
+    spec: dict[str, Any] | None = None
+    try:
+        from .encoder_lib import load_encoder_spec
+
+        spec = load_encoder_spec(encoder_dir)
+        result.add(
+            "encoder_spec_valid",
+            True,
+            f"model={spec['model_name']} max_tokens={spec['max_tokens']} "
+            f"topk={spec['topk_windows']} blend_weight={spec['blend_weight']}",
+        )
+    except Exception as exc:
+        result.add("encoder_spec_valid", False, str(exc))
+
+    if spec is not None:
+        checkpoints = [encoder_dir / f"fold{k}.pt" for k in range(int(spec["n_folds"]))]
+        missing = [p.name for p in checkpoints if not p.is_file()]
+        if missing:
+            problems.append(f"fold checkpoints missing: {missing}")
+        empty = [p.name for p in checkpoints if p.is_file() and p.stat().st_size < 1_000_000]
+        if empty:
+            # A ModernBERT-class state dict is hundreds of MB; a tiny file is a truncated
+            # copy, and torch.load would fail only at container time.
+            problems.append(f"suspiciously small checkpoints (<1MB): {empty}")
+
+    result.add(
+        "encoder_assets_complete",
+        not problems,
+        "; ".join(problems) or "encoder_lib + tokenizer + config + all fold checkpoints present",
+    )
+    return True
+
+
 def verify_sklearn_version(workdir: Path, result: VerifyResult) -> None:
     """Assert the bundle was built with the container's scikit-learn version.
 
@@ -651,8 +710,15 @@ def verify_prediction_sanity(
         work / "data" / "submission_format.csv", index=False
     )
 
+    # An encoder bundle runs real transformer inference; on a CPU-only verify host that can
+    # exceed the base 30-minute budget without anything being wrong.
+    has_encoder = (work / "assets" / "encoder").is_dir()
     proc = subprocess.run(
-        [sys.executable, "main.py"], cwd=work, capture_output=True, text=True, timeout=1800
+        [sys.executable, "main.py"],
+        cwd=work,
+        capture_output=True,
+        text=True,
+        timeout=7200 if has_encoder else 1800,
     )
     if proc.returncode != 0:
         result.add("prediction_sanity", False, f"main.py exited {proc.returncode}")
@@ -802,10 +868,12 @@ def verify(
     # Bundle checks must inspect the EXACT archive named above, never a persistent
     # _smoke directory left by an older build.
     bundle_dir = _extract_for_structural_checks(zip_path, sdir / "_verify")
+    encoder_shipped = False
     if bundle_dir is not None:
         verify_no_cross_row_features(bundle_dir, result)
         verify_sklearn_version(bundle_dir, result)
         verify_feature_order(bundle_dir, result)
+        encoder_shipped = verify_encoder_assets(bundle_dir, result)
 
     main_src = sources.get("main.py", "")
     result.add(
@@ -859,6 +927,8 @@ def verify(
     expected = set(REQUIRED_CHECKS)
     if check_predictions:
         expected |= set(PREDICTION_CHECKS)
+    if encoder_shipped:
+        expected |= set(ENCODER_CHECKS)
     missing = sorted(expected - ran)
     result.add(
         "all_expected_checks_ran",

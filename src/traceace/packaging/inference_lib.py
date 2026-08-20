@@ -957,6 +957,28 @@ def frame_from_spans(df: pd.DataFrame, spans: list[tuple[int, int]]) -> pd.DataF
     return pd.concat(parts) if len(parts) > 1 else parts[0]
 
 
+# Role tags for the neural transcript encoder's input text. Abbreviated because the tag
+# repeats once per utterance and a 267-utterance session cannot afford five tokens each.
+# `background` is kept: it is a diarization-failure bucket containing real tutor speech.
+ROLE_PREFIX = {"tutor": "T:", "student": "S:", "background": "B:"}
+
+
+def render_windows(df: pd.DataFrame) -> str:
+    """Role-tagged dialogue text for the selected windows.
+
+    Lives HERE — not in the training module — because training and the packaged main.py
+    must render byte-identical text from the same spans (ADR-007). The training side
+    imports this function; a second implementation would be a parity bug waiting to fire.
+    """
+    roles = df.get("role", pd.Series("", index=df.index)).fillna("").astype(str)
+    content = df.get("content", pd.Series("", index=df.index)).fillna("").astype(str)
+    return "\n".join(
+        f"{ROLE_PREFIX.get(role, '?:')} {text}".strip()
+        for role, text in zip(roles, content)
+        if text.strip()
+    )
+
+
 def lo_prior_values(lo_ids: np.ndarray, spec: dict[str, Any]) -> np.ndarray:
     """Apply one booster's training-fold LO target-encoding map."""
     values = dict(spec.get("values", {}))
