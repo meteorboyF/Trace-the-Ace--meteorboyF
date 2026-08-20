@@ -1,6 +1,39 @@
 # STATE.md — read this first
 
-**Last updated:** 2026-07-31 · **CI: green ✅** · all numbers are mean ± SD over 5 fold assignments
+**Last updated:** 2026-08-19 · **CI: green ✅**
+
+> ## ⚡ 2026-08-19 — encoder campaign status (supersedes everything below; details in [`ENDGAME.md`](ENDGAME.md))
+>
+> **Fold-0 probes on the A100 (67 units spent, ~666 left):**
+>
+> | config | solo AUC | blend w/ honest GBDT (0.6091) | verdict |
+> |---|---|---|---|
+> | ModernBERT 2048 tok / 4 win | 0.5738 | 0.6167 (w=0.15) | context-starved |
+> | **ModernBERT 3072 tok / 6 win** | **0.5979** | **0.6235 (w=0.25)** | ✅ **winner — clears the 0.622 top-15 line on fold 0** |
+> | Qwen3-0.6B 2048 / 4 | 0.5774 | 0.6173 (w=0.20) | 3× cost, no gain — rejected |
+>
+> Lesson: the bottleneck was dialogue *quantity*, not model capacity. Epoch curves:
+> wide config still climbing at epoch 3 (0.534→0.593→0.598); baseline overfits after ep2.
+>
+> **Full 5-fold run** (`experiment="probe.enc_wide"`, epochs=3, lr 3e-5, 3072/6,
+> objective-disjoint, ~66 units): operator launches/launched it with
+> `shutdown_after=True`. It auto-assembles the OOF and prints the honest
+> `within_objective_fold_auc` + projected LB. Fold 0 was the GBDT's best fold, so the
+> 5-fold mean will read below 0.6235 — that is composition, not decay.
+>
+> **Encoder packaging is BUILT and VERIFIED** (`f480c51`): weights/tokenizer/config
+> vendored, offline inference in `encoder_lib.py`, logit blend at an explicit
+> `encoder_weight`, 28/28 verify checks green incl. parity + OOF replay through the
+> blended pipeline. Smoke: 100 rows in 64 s → projected **1.87 h** vs the 6 h cap.
+>
+> **Next, in order:** (1) read the full-run OOF number; (2) blend with
+> `model.gbdt_objective`, re-run `evaluate.by_objective_fold`; (3) if the blend holds
+> ≥ ~0.615, `submission.build(experiment="model.gbdt", encoder_experiment="probe.enc_wide",
+> encoder_weight=<measured>)` → smoke → **spend a slot**; (4) levers left: second-seed
+> encoder ensemble (~+0.003–0.005), move-taxonomy features (write-up centrepiece).
+> Recentring half-way to ≈0.694 is applied only to the FINAL Aug-27 submission.
+
+All numbers below are mean ± SD over 5 fold assignments (2026-07-31 state).
 **Competition deadline:** model submissions 2026-08-27 23:59 UTC · write-up 2026-09-15
 **Entry:** solo · **Units remaining: 728.97 / 733**
 
