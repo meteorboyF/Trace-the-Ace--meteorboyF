@@ -223,7 +223,46 @@ def restore_artifacts(force: bool = False, subsample: int | None = None) -> dict
         )
         is not None
     ]
-    return {"restored": restored, "n_restored": len(restored)}
+    mirrored = _restore_mirrors()
+    return {"restored": restored, "n_restored": len(restored), "mirror_files": mirrored}
+
+
+def _restore_mirrors() -> int:
+    """Merge the per-file Drive mirrors over whatever the tarballs restored.
+
+    **Why this exists (2026-08-22, evening).** The rollup tar is written asynchronously by
+    Drive FUSE; deleting a runtime with the upload still queued silently drops it. That
+    happened twice in one day. The per-file mirrors (fold weights, predictions, OOFs) are
+    small-to-medium individual files that flush reliably — the morning's mirrors survived
+    the very deletion that dropped the 2.4 GB rollup. So restore treats mirrors as the
+    AUTHORITATIVE newer layer: anything present in a mirror overwrites the tar's version,
+    and a stale rollup can no longer force an operator into manual terminal surgery.
+    """
+    import shutil
+
+    cfg = get_config()
+    if cfg.drive_root is None:
+        return 0
+    copied = 0
+    for mirror_name, local_rel in (
+        ("models_mirror", "artifacts/models"),
+        ("oof_mirror", "artifacts/oof"),
+    ):
+        mirror_root = cfg.drive_root / mirror_name
+        if not mirror_root.is_dir():
+            continue
+        for src in sorted(mirror_root.rglob("*")):
+            if not src.is_file():
+                continue
+            dest = cfg.work_dir / local_rel / src.relative_to(mirror_root)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.is_file() and dest.stat().st_size == src.stat().st_size:
+                continue  # already identical; skip the Drive read
+            shutil.copyfile(src, dest)
+            copied += 1
+    if copied:
+        log.info("restore_artifacts: merged %d file(s) from Drive mirrors", copied)
+    return copied
 
 
 def artifacts_dir(config: Any = None) -> Path:
