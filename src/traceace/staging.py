@@ -19,6 +19,7 @@ Locally (``drive_root is None``) staging is a no-op: the data already sits in
 
 from __future__ import annotations
 
+import os
 import shutil
 import tarfile
 import time
@@ -133,6 +134,45 @@ def _extract_archive(archive: Path, dest_dir: Path, into_named_dir: bool = False
             zf.extract(m, target)
 
 
+def _assert_drive_alive(drive_root: Path) -> None:
+    """Refuse to 'sync' into a Drive mount that is no longer real.
+
+    **The failure this exists for, observed 2026-08-22:** an overnight A100 session's Drive
+    mount died mid-run. ``/content/drive`` degraded into a plain local directory, so every
+    ``copyfile`` into it SUCCEEDED and logged "wrote ..." — and all of it evaporated with
+    the runtime. Four trained encoder folds (~58 units) were lost while the logs showed
+    five successful syncs. A sync that cannot fail is worse than no sync: it converts a
+    recoverable interruption into silent total loss.
+
+    Two cheap checks, both against that exact failure mode:
+
+    * the Colab mountpoint must still BE a mountpoint (a dead mount is a plain dir), and
+    * a sentinel write-and-readback through the mount must round-trip.
+
+    Neither proves the bytes reached Google's servers (FUSE uploads are asynchronous; only
+    ``drive.flush_and_unmount()`` at shutdown forces that), but they catch the
+    phantom-directory case, which is the one that actually burned us.
+    """
+    mount_root = Path("/content/drive")
+    if mount_root != drive_root and mount_root not in drive_root.parents:
+        return  # not a Colab-style Drive path (e.g. tests with a tmp dir)
+    if not os.path.ismount(mount_root):
+        raise RuntimeError(
+            f"{mount_root} is NOT a live mount — Google Drive has disconnected. Writes "
+            "would land in a phantom local directory and vanish with the runtime. "
+            "Re-run drive.mount() (the notebook setup cell) before syncing."
+        )
+    probe = drive_root / ".sync_liveness"
+    token = str(time.time_ns())
+    try:
+        probe.write_text(token)
+        echoed = probe.read_text()
+    except OSError as exc:
+        raise RuntimeError(f"Drive liveness probe failed ({exc}) — refusing to sync") from exc
+    if echoed != token:
+        raise RuntimeError("Drive liveness probe did not round-trip — refusing to sync")
+
+
 def sync_to_drive(local_path: Path, drive_rel: str, as_tar: bool = True) -> Path | None:
     """Push a local file/dir to Drive as a SINGLE archive (the only Drive writer).
 
@@ -152,6 +192,7 @@ def sync_to_drive(local_path: Path, drive_rel: str, as_tar: bool = True) -> Path
     if cfg.drive_root is None:
         log.info("sync_to_drive: local mode, nothing to sync (%s)", local_path)
         return None
+    _assert_drive_alive(cfg.drive_root)
 
     dest = cfg.drive_root / drive_rel
     dest.parent.mkdir(parents=True, exist_ok=True)

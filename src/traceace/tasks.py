@@ -223,6 +223,17 @@ def _maybe_shutdown() -> None:
         )
         return
     try:
+        # Drive FUSE uploads are asynchronous: copyfile returning does NOT mean the bytes
+        # reached Google. unassign() before the flush drops pending uploads — observed
+        # 2026-08-22, when an overnight run's artifacts evaporated despite five logged
+        # "successful" syncs. flush_and_unmount forces the uploads to complete first.
+        from google.colab import drive as colab_drive  # noqa: PLC0415
+
+        log.warning("flushing Drive uploads (flush_and_unmount) before shutdown.")
+        colab_drive.flush_and_unmount()
+    except Exception as exc:
+        log.info("no Colab Drive to flush (%s)", exc)
+    try:
         log.warning("sync complete -> terminating runtime to stop billing.")
         from google.colab import runtime as colab_runtime  # noqa: PLC0415
 

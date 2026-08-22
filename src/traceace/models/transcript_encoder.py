@@ -42,6 +42,7 @@ import json
 import math
 import os
 import random
+import shutil
 from dataclasses import dataclass
 from typing import Any
 
@@ -636,21 +637,43 @@ def train(
                         examples, fold, cfg, split_mode, subsample, seed, directory, fold_seed
                     )
                 )
-            # Checkpoint to Drive after EVERY fold. The runtime's local SSD does not
-            # survive a disconnect, so without this a drop at fold 4 of 5 loses ~24 units
-            # of finished training. Best-effort: a sync failure (e.g. running locally with
-            # no Drive) must not kill a training run that is otherwise succeeding.
-            try:
-                from ..maintenance import sync_artifacts
+            # Checkpoint to Drive after EVERY fold: tarred artifacts PLUS direct copies of
+            # this fold's files. The direct copies are redundancy against exactly the
+            # 2026-08-22 failure — a 2.4GB rollup upload dropped at teardown — because a
+            # handful of individually-large files is the case Drive FUSE handles well.
+            #
+            # A sync failure is FATAL, not a warning. On 2026-08-22 the Drive mount died
+            # mid-run, every sync "succeeded" into a phantom local directory, and four
+            # trained folds evaporated with the runtime. Stopping after the current fold
+            # loses nothing: remount Drive (the notebook setup cell) and re-run — finished
+            # folds are skipped by name. (Local runs have no drive_root; sync is a no-op
+            # there and cannot raise.)
+            from ..config import get_config as _get_config
+            from ..maintenance import sync_artifacts
 
+            try:
                 with heartbeat(f"encoder fold {fold}: sync to Drive"):
                     sync_artifacts()
+                drive_root = _get_config().drive_root
+                if drive_root is not None:
+                    mirror = drive_root / "models_mirror" / directory.name
+                    mirror.mkdir(parents=True, exist_ok=True)
+                    for name in (
+                        f"fold{fold}_model.pt",
+                        f"fold{fold}_predictions.parquet",
+                        f"fold{fold}_config.json",
+                        "training_manifest.json",
+                    ):
+                        src = directory / name
+                        if src.is_file():
+                            shutil.copyfile(src, mirror / name)
             except Exception as exc:
-                log.warning(
-                    "per-fold Drive sync failed (%s) — training continues, but a "
-                    "disconnect now loses every unsynced fold. If on Colab, investigate.",
-                    exc,
-                )
+                raise RuntimeError(
+                    f"Drive sync FAILED after fold {fold}: {exc}. Stopping here so finished "
+                    "folds are not silently at risk — every completed fold before this one "
+                    "is safe on Drive. Remount Drive (setup cell) and re-run this cell to "
+                    "resume; completed folds are skipped by name."
+                ) from exc
 
     # --- assemble the OOF once every fold is present --------------------------------
     available = sorted(
@@ -697,7 +720,15 @@ def train(
     oof = oof.merge(feats[["response_id", "session_id"]], on="response_id", how="left")
     if oof["response_id"].duplicated().any():
         raise RuntimeError("assembled OOF has duplicate response_ids; fold partitions overlap")
-    save_oof(experiment, oof, subsample=subsample)
+    oof_path_local = save_oof(experiment, oof, subsample=subsample)
+    from ..config import get_config as _get_config
+
+    drive_root = _get_config().drive_root
+    if drive_root is not None:
+        mirror = drive_root / "oof_mirror"
+        mirror.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(oof_path_local, mirror / oof_path_local.name)
+        log.info("encoder: OOF mirrored directly to Drive")
 
     scored = score_frame(oof, experiment, subsample=subsample)
     result.update(scored)
