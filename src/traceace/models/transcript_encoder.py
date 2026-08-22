@@ -349,9 +349,21 @@ def _fold_config_path(directory: Any, fold: int):
     return directory / f"fold{fold}_config.json"
 
 
-def _fold_provenance(cfg: EncoderConfig, split_mode: str, fold_seed: int | None) -> dict[str, Any]:
-    """Everything that makes two folds' predictions comparable."""
-    return {"config": cfg.to_dict(), "split_mode": split_mode, "fold_seed": fold_seed}
+def _fold_provenance(
+    cfg: EncoderConfig, split_mode: str, fold_seed: int | None, seed: int | None = None
+) -> dict[str, Any]:
+    """Everything that makes two folds' predictions comparable.
+
+    ``seed`` is included because it lives OUTSIDE EncoderConfig: a seed-ensemble run differs
+    from its sibling in nothing else, so without it two seeds under one experiment name
+    would assemble into a silently mixed OOF that every guard would wave through.
+    """
+    return {
+        "config": cfg.to_dict(),
+        "split_mode": split_mode,
+        "fold_seed": fold_seed,
+        "seed": seed,
+    }
 
 
 def _check_fold_provenance(directory: Any, folds: list[int], expected: dict[str, Any]) -> None:
@@ -533,7 +545,7 @@ def _train_one_fold(
     # The config sidecar lands first: predictions without provenance are treated as
     # untrusted by the assembly guard, so the write order fails safe.
     _fold_config_path(directory, fold).write_text(
-        json.dumps(_fold_provenance(cfg, split_mode, fold_seed), sort_keys=True)
+        json.dumps(_fold_provenance(cfg, split_mode, fold_seed, seed), sort_keys=True)
     )
     torch.save(
         {"state_dict": best_state, "valid_auc": best_auc},
@@ -714,7 +726,7 @@ def train(
         log.info("encoder: %s", result["status"])
         return result
 
-    _check_fold_provenance(directory, expected, _fold_provenance(cfg, split_mode, fold_seed))
+    _check_fold_provenance(directory, expected, _fold_provenance(cfg, split_mode, fold_seed, seed))
     parts = [pd.read_parquet(_fold_pred_path(directory, f)) for f in expected]
     oof = pd.concat(parts, ignore_index=True)
     oof = oof.merge(feats[["response_id", "session_id"]], on="response_id", how="left")
