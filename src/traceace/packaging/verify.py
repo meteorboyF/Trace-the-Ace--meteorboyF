@@ -526,6 +526,21 @@ def verify_encoder_assets(workdir: Path, result: VerifyResult) -> bool:
     tokenizer_dir = encoder_dir / "tokenizer"
     if not tokenizer_dir.is_dir() or not any(tokenizer_dir.iterdir()):
         problems.append("tokenizer/ missing or empty")
+    else:
+        # The container runs whatever transformers its image froze; a tokenizer_class name
+        # from a NEWER transformers (e.g. v5's "TokenizersBackend") makes AutoTokenizer
+        # raise before loading anything — the exact failure of submission job id-6296.
+        # Only the universal class name is shippable.
+        tokenizer_config_path = tokenizer_dir / "tokenizer_config.json"
+        if tokenizer_config_path.is_file():
+            declared = json.loads(tokenizer_config_path.read_text()).get("tokenizer_class")
+            if declared not in (None, "PreTrainedTokenizerFast"):
+                problems.append(
+                    f"tokenizer_class {declared!r} is version-specific and will not load in "
+                    "the container; rebuild (submission.build rewrites it)"
+                )
+        if not (tokenizer_dir / "tokenizer.json").is_file():
+            problems.append("tokenizer/tokenizer.json missing (needed for the raw-load fallback)")
     config_dir = encoder_dir / "config"
     if not (config_dir / "config.json").is_file():
         problems.append("config/config.json missing")

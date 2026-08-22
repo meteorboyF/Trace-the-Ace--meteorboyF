@@ -82,11 +82,32 @@ def build_inference_model(encoder_dir: Path):
 
 
 def _load_tokenizer(encoder_dir: Path):
-    from transformers import AutoTokenizer
+    """Load the vendored tokenizer, surviving transformers-version skew.
 
-    tokenizer = AutoTokenizer.from_pretrained(Path(encoder_dir) / "tokenizer")
+    The 2026-08-22 submission failed on exactly this line: the build machine's newer
+    transformers wrote a ``tokenizer_class`` name the container's older transformers does
+    not know, and ``AutoTokenizer`` raised before anything loaded. The class name is
+    metadata; the actual vocabulary and merges live in ``tokenizer.json``, which every
+    transformers version can load directly through ``PreTrainedTokenizerFast``. So: try
+    the polite route, and on ANY failure load the raw file — same tokens either way.
+    """
+    from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+    tokenizer_dir = Path(encoder_dir) / "tokenizer"
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir)
+    except Exception:
+        tokenizer = PreTrainedTokenizerFast(tokenizer_file=str(tokenizer_dir / "tokenizer.json"))
+
     if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        # Encoder vocabularies (ModernBERT-style) carry [PAD]; decoder ones use EOS.
+        vocab = tokenizer.get_vocab()
+        if "[PAD]" in vocab:
+            tokenizer.pad_token = "[PAD]"
+        elif tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            raise RuntimeError("vendored tokenizer has no pad token and no EOS to substitute")
     return tokenizer
 
 

@@ -220,6 +220,19 @@ def _vendor_encoder_assets(
     model_name = str(encoder_cfg["model_name"])
     AutoTokenizer.from_pretrained(model_name).save_pretrained(encoder_dir / "tokenizer")
     AutoConfig.from_pretrained(model_name).save_pretrained(encoder_dir / "config")
+
+    # CONTAINER-COMPAT (root cause of the failed 2026-08-22 submission, job id-6296):
+    # the build machine's transformers stamped tokenizer_config.json with its own class
+    # name ("TokenizersBackend", a v5 name); the competition image runs an OLDER
+    # transformers that has no such class and raises before loading a single weight.
+    # "PreTrainedTokenizerFast" is the universal fast-tokenizer class, recognised by every
+    # transformers version this project could meet, and the actual vocabulary lives in
+    # tokenizer.json regardless — so rewriting the class name changes behaviour nowhere
+    # while making the file loadable everywhere.
+    tokenizer_config_path = encoder_dir / "tokenizer" / "tokenizer_config.json"
+    tokenizer_config = json.loads(tokenizer_config_path.read_text())
+    tokenizer_config["tokenizer_class"] = "PreTrainedTokenizerFast"
+    tokenizer_config_path.write_text(json.dumps(tokenizer_config, indent=2))
     for k, src in enumerate(checkpoints):
         shutil.copyfile(src, encoder_dir / f"fold{k}.pt")
 
