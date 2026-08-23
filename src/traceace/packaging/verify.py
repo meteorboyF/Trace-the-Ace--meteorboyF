@@ -516,13 +516,65 @@ def verify_encoder_assets(workdir: Path, result: VerifyResult) -> bool:
     only for bundles that actually ship one, so ``all_expected_checks_ran`` stays exact in
     both configurations.
     """
-    encoder_dir = workdir / "assets" / "encoder"
-    if not encoder_dir.is_dir():
+    encoder_root = workdir / "assets" / "encoder"
+    if not encoder_root.is_dir():
         return False
 
     problems: list[str] = []
     if not (workdir / "encoder_lib.py").is_file():
         problems.append("encoder_lib.py missing from zip root")
+
+    # An ensemble puts each member in its own subdirectory; a single encoder sits directly
+    # under assets/encoder/. Every member gets the SAME checks — a half-verified ensemble
+    # is exactly how a broken member reaches the leaderboard.
+    member_dirs: list[Path] = []
+    manifest_path = encoder_root / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            member_dirs = [encoder_root / str(e["name"]) for e in manifest["encoders"]]
+            weight_total = float(manifest["base_weight"]) + sum(
+                float(e["weight"]) for e in manifest["encoders"]
+            )
+            if not 0.99 <= weight_total <= 1.01:
+                problems.append(f"ensemble weights sum to {weight_total:.4f}, expected 1.0")
+        except (KeyError, ValueError, TypeError) as exc:
+            problems.append(f"unreadable encoder manifest ({exc})")
+    else:
+        member_dirs = [encoder_root]
+
+    for encoder_dir in member_dirs:
+        problems.extend(_encoder_member_problems(encoder_dir))
+
+    try:
+        from .encoder_lib import load_ensemble_spec
+
+        loaded = load_ensemble_spec(encoder_root)
+        summary = " · ".join(
+            f"{m.get('name', 'single')}: max_tokens={m['max_tokens']} topk={m['topk_windows']} "
+            f"w={m['weight']:.3f}"
+            for m in loaded["encoders"]
+        )
+        result.add(
+            "encoder_spec_valid",
+            True,
+            f"base_weight={loaded['base_weight']:.3f} · {summary}",
+        )
+    except Exception as exc:
+        result.add("encoder_spec_valid", False, str(exc))
+
+    result.add(
+        "encoder_assets_complete",
+        not problems,
+        "; ".join(problems) or f"encoder_lib + {len(member_dirs)} complete encoder(s) present",
+    )
+    return True
+
+
+def _encoder_member_problems(encoder_dir: Path) -> list[str]:
+    """Structural problems with ONE vendored encoder directory."""
+    problems: list[str] = []
+    label = encoder_dir.name
     tokenizer_dir = encoder_dir / "tokenizer"
     if not tokenizer_dir.is_dir() or not any(tokenizer_dir.iterdir()):
         problems.append("tokenizer/ missing or empty")
@@ -545,19 +597,13 @@ def verify_encoder_assets(workdir: Path, result: VerifyResult) -> bool:
     if not (config_dir / "config.json").is_file():
         problems.append("config/config.json missing")
 
-    spec: dict[str, Any] | None = None
     try:
         from .encoder_lib import load_encoder_spec
 
         spec = load_encoder_spec(encoder_dir)
-        result.add(
-            "encoder_spec_valid",
-            True,
-            f"model={spec['model_name']} max_tokens={spec['max_tokens']} "
-            f"topk={spec['topk_windows']} blend_weight={spec['blend_weight']}",
-        )
     except Exception as exc:
-        result.add("encoder_spec_valid", False, str(exc))
+        problems.append(f"unreadable encoder.json ({exc})")
+        spec = None
 
     if spec is not None:
         checkpoints = [encoder_dir / f"fold{k}.pt" for k in range(int(spec["n_folds"]))]
@@ -570,12 +616,7 @@ def verify_encoder_assets(workdir: Path, result: VerifyResult) -> bool:
             # copy, and torch.load would fail only at container time.
             problems.append(f"suspiciously small checkpoints (<1MB): {empty}")
 
-    result.add(
-        "encoder_assets_complete",
-        not problems,
-        "; ".join(problems) or "encoder_lib + tokenizer + config + all fold checkpoints present",
-    )
-    return True
+    return [f"[{label}] {problem}" for problem in problems]
 
 
 def verify_sklearn_version(workdir: Path, result: VerifyResult) -> None:

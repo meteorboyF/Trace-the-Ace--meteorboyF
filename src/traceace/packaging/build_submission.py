@@ -200,11 +200,36 @@ def _collect_encoder(experiment: str) -> tuple[dict[str, Any], list[Path]]:
     return encoder_cfg, checkpoints
 
 
-def _vendor_encoder_assets(
+def _vendor_encoder_ensemble(
     staging: Path,
+    members: list[tuple[str, dict[str, Any], list[Path], float]],
+    base_weight: float,
+) -> dict[str, Any]:
+    """Vendor N encoders under ``assets/encoder/<name>/`` plus a top-level manifest.
+
+    Each member keeps its OWN tokenizer, config and ``encoder.json`` because ensemble members
+    differ in exactly the parameters inference needs (``topk_windows``, ``max_tokens``) — a
+    shared config would silently feed one member the other's window width.
+    """
+    encoder_root = staging / "assets" / "encoder"
+    encoder_root.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for name, encoder_cfg, checkpoints, weight in members:
+        spec = _vendor_encoder_assets(
+            encoder_root / name, encoder_cfg, checkpoints, weight, make_dir=True
+        )
+        entries.append({"name": name, "weight": float(weight), **spec})
+    manifest = {"base_weight": float(base_weight), "encoders": entries}
+    (encoder_root / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest
+
+
+def _vendor_encoder_assets(
+    encoder_dir: Path,
     encoder_cfg: dict[str, Any],
     checkpoints: list[Path],
     blend_weight: float,
+    make_dir: bool = False,
 ) -> dict[str, Any]:
     """Write tokenizer + config + fold weights + encoder.json under assets/encoder/.
 
@@ -214,8 +239,8 @@ def _vendor_encoder_assets(
     """
     from transformers import AutoConfig, AutoTokenizer
 
-    encoder_dir = staging / "assets" / "encoder"
-    encoder_dir.mkdir(parents=True, exist_ok=True)
+    if make_dir:
+        encoder_dir.mkdir(parents=True, exist_ok=True)
 
     model_name = str(encoder_cfg["model_name"])
     AutoTokenizer.from_pretrained(model_name).save_pretrained(encoder_dir / "tokenizer")
@@ -273,14 +298,21 @@ def build(
     apply_deployment_shrinkage: bool = False,
     encoder_experiment: str | None = None,
     encoder_weight: float | None = None,
+    encoder_experiments: list[str] | None = None,
+    encoder_weights: list[float] | None = None,
 ) -> dict[str, Any]:
     """Package the submission.
 
-    ``encoder_experiment`` + ``encoder_weight`` ship the neural transcript encoder alongside
-    the GBDT: fold weights are vendored under ``assets/encoder/`` and main.py blends the two
-    in logit space at ``encoder_weight``. The weight must be passed EXPLICITLY — it comes
-    from the honest objective-fold blend (evaluate.by_objective_fold on the blend OOF), and
-    baking in a default would let a stale number ship unnoticed.
+    Neural encoders ship alongside the GBDT in one of two forms:
+
+    * ``encoder_experiment`` + ``encoder_weight`` — a single encoder (the layout that scored
+      on 2026-08-22; kept working unchanged).
+    * ``encoder_experiments`` + ``encoder_weights`` — an ENSEMBLE. Weights are the encoder
+      entries from ``ensemble.blend``'s simplex, and the base model silently receives
+      ``1 - sum(weights)``, so the packaged blend is arithmetically the OOF blend measured.
+
+    Weights must be passed EXPLICITLY in both forms — they come from the honest
+    objective-fold blend, and a default would let a stale number ship unnoticed.
     """
     import joblib
 
@@ -303,21 +335,46 @@ def build(
     sparse_lib_src = Path(__file__).resolve().parent / "sparse_text_lib.py"
     shutil.copyfile(sparse_lib_src, staging / "sparse_text_lib.py")
 
-    # --- neural transcript encoder (optional) --------------------------------
-    encoder_spec = None
+    # --- neural transcript encoder(s) (optional) -----------------------------
+    if encoder_experiment is not None and encoder_experiments is not None:
+        raise ValueError("pass encoder_experiment OR encoder_experiments, not both")
     if encoder_experiment is not None:
-        if encoder_weight is None:
+        encoder_experiments = [encoder_experiment]
+        encoder_weights = [encoder_weight] if encoder_weight is not None else None
+
+    encoder_spec: dict[str, Any] | None = None
+    if encoder_experiments:
+        if encoder_weights is None or len(encoder_weights) != len(encoder_experiments):
             raise ValueError(
-                "encoder_weight is required when packaging an encoder — pass the weight "
-                "measured by the honest objective-fold blend, never a default"
+                "one encoder_weight per encoder is required — pass the weights measured by "
+                "the honest objective-fold blend, never a default"
             )
-        if not 0.0 < float(encoder_weight) <= 1.0:
-            raise ValueError(f"encoder_weight {encoder_weight} outside (0, 1]")
-        encoder_cfg, checkpoints = _collect_encoder(encoder_experiment)
+        weights = [float(w) for w in encoder_weights]
+        if any(w <= 0.0 for w in weights):
+            raise ValueError(f"encoder weights must be positive, got {weights}")
+        total = sum(weights)
+        if total >= 1.0:
+            raise ValueError(
+                f"encoder weights sum to {total:.4f}, leaving the GBDT base weight "
+                f"{1.0 - total:.4f}. Weights come from ensemble.blend's simplex and must "
+                "leave the base a positive share."
+            )
+        members = []
+        for name, weight in zip(encoder_experiments, weights):
+            member_cfg, member_checkpoints = _collect_encoder(name)
+            members.append((name.replace(".", "_"), member_cfg, member_checkpoints, weight))
         with heartbeat("vendoring encoder assets"):
-            encoder_spec = _vendor_encoder_assets(
-                staging, encoder_cfg, checkpoints, float(encoder_weight)
-            )
+            if len(members) == 1 and encoder_experiment is not None:
+                # legacy single-encoder layout, byte-identical to the scored 2026-08-22 zip
+                encoder_spec = _vendor_encoder_assets(
+                    staging / "assets" / "encoder",
+                    members[0][1],
+                    members[0][2],
+                    weights[0],
+                    make_dir=True,
+                )
+            else:
+                encoder_spec = _vendor_encoder_ensemble(staging, members, 1.0 - total)
         encoder_lib_src = Path(__file__).resolve().parent / "encoder_lib.py"
         shutil.copyfile(encoder_lib_src, staging / "encoder_lib.py")
 
@@ -408,7 +465,7 @@ def build(
         "hybrid": bool(promotion),
         "deployment_shrinkage": bool(apply_deployment_shrinkage),
         "encoder": encoder_spec,  # None when no encoder is shipped
-        "encoder_experiment": encoder_experiment,
+        "encoder_experiments": list(encoder_experiments or []),
         "sklearn_build_version": __import__("sklearn").__version__,
         "seed": cfg.seed,
         "clip_eps": cfg.predict_clip_eps,

@@ -87,13 +87,14 @@ def main() -> int:
     hybrid_promotion = bundle.get("hybrid_promotion")
     lo_prior_by_booster = list(bundle.get("lo_prior_by_booster", []))
 
-    # Neural transcript encoder: present only when submission.build vendored it.
+    # Neural transcript encoder(s): present only when submission.build vendored them.
+    # One entry for a single encoder, N for an ensemble; each carries its own window width.
     ENCODER_DIR = ASSETS / "encoder"
-    encoder_spec = None
+    ensemble = None
     if ENCODER_DIR.is_dir():
         import encoder_lib as elib
 
-        encoder_spec = elib.load_encoder_spec(ENCODER_DIR)
+        ensemble = elib.load_ensemble_spec(ENCODER_DIR)
     log("assets loaded")
 
     sub_fmt = pd.read_csv(DATA / "submission_format.csv", dtype={"response_id": str})
@@ -190,16 +191,21 @@ def main() -> int:
             )
             feats["_lo_id"] = lo_id
             feats["_use_fallback"] = not transcript_ok
-            # The encoder reads its OWN top-k windows (its k differs from the feature
-            # blocks'), rendered by the same shared code training used. Empty string means
-            # "no transcript" — the encoder abstains and the row keeps the base prediction.
-            if encoder_spec is not None and transcript_ok:
-                enc_keep = ilib.topk_spans(
-                    lo_text, vectorizer, wm, spans, int(encoder_spec["topk_windows"])
-                )
-                feats["_enc_text"] = ilib.render_windows(ilib.frame_from_spans(tdf, enc_keep))
-            else:
-                feats["_enc_text"] = ""
+            # Each encoder reads its OWN top-k windows (ensemble members differ precisely
+            # in how much dialogue they see), rendered by the same shared code training
+            # used. Empty string means "no transcript" — that encoder abstains and the row
+            # keeps the remaining arms, reweighted.
+            if ensemble is not None:
+                for slot, member in enumerate(ensemble["encoders"]):
+                    if transcript_ok:
+                        enc_keep = ilib.topk_spans(
+                            lo_text, vectorizer, wm, spans, int(member["topk_windows"])
+                        )
+                        feats[f"_enc_text{slot}"] = ilib.render_windows(
+                            ilib.frame_from_spans(tdf, enc_keep)
+                        )
+                    else:
+                        feats[f"_enc_text{slot}"] = ""
             rows.append(feats)
     log("features extracted")
 
@@ -218,7 +224,10 @@ def main() -> int:
 
     lo_ids = X.pop("_lo_id").to_numpy() if "_lo_id" in X.columns else None
     text_documents = X.pop("_text_document").astype(str).tolist()
-    encoder_texts = X.pop("_enc_text").astype(str).tolist() if "_enc_text" in X.columns else None
+    encoder_texts = [
+        X.pop(column).astype(str).tolist()
+        for column in sorted(c for c in X.columns if c.startswith("_enc_text"))
+    ]
     use_fallback = X.pop("_use_fallback").to_numpy(dtype=bool)
     ids = X.pop("response_id").to_numpy()
     for c in feature_cols:
@@ -271,12 +280,20 @@ def main() -> int:
     # Deliberately NO try/except fallback: failed jobs do not count against the weekly
     # submission limit, so a loud crash costs nothing, while silently shipping base-only
     # predictions would waste a real slot on a model we did not intend to submit.
-    if encoder_spec is not None:
-        if encoder_texts is None:
-            raise RuntimeError("encoder assets present but no rendered texts were collected")
-        encoder_probs = elib.predict_probs(ENCODER_DIR, encoder_texts)
-        preds = elib.blend_with_base(
-            preds, encoder_probs, float(encoder_spec["blend_weight"]), eps=EPS
+    if ensemble is not None:
+        members = ensemble["encoders"]
+        if len(encoder_texts) != len(members):
+            raise RuntimeError("rendered encoder texts do not match the packaged encoders")
+        member_probs = [
+            elib.predict_probs(member["dir"], texts)
+            for member, texts in zip(members, encoder_texts)
+        ]
+        preds = elib.blend_ensemble(
+            preds,
+            member_probs,
+            [float(member["weight"]) for member in members],
+            float(ensemble["base_weight"]),
+            eps=EPS,
         )
         log("encoder blended")
 
