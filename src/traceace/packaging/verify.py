@@ -86,6 +86,7 @@ REQUIRED_CHECKS = (
     "no_nan_probabilities",
     "probabilities_in_unit_interval",
     "probabilities_clipped_off_0_and_1",
+    "logit_shift_sane",
 )
 # Additionally required when ``check_predictions`` is on (the default).
 PREDICTION_CHECKS = (
@@ -619,6 +620,36 @@ def _encoder_member_problems(encoder_dir: Path) -> list[str]:
     return [f"[{label}] {problem}" for problem in problems]
 
 
+def verify_logit_shift(workdir: Path, result: VerifyResult) -> None:
+    """The recentring shift must be tiny, intentional, and identical in bundle & manifest.
+
+    The half-recentring case is ≈ −0.040; anything larger is a typo, and a bundle/manifest
+    disagreement means the zip was assembled from mixed build runs.
+    """
+    try:
+        manifest = json.loads((workdir / "assets" / "MANIFEST.json").read_text())
+        declared = float(manifest.get("logit_shift", 0.0))
+    except Exception as exc:
+        result.add("logit_shift_sane", False, f"unreadable MANIFEST.json ({exc})")
+        return
+    problems = []
+    if not -0.1 <= declared <= 0.1:
+        problems.append(f"manifest logit_shift {declared} outside ±0.1")
+    try:
+        import joblib
+
+        bundled = float(joblib.load(workdir / "assets" / "model.joblib").get("logit_shift", 0.0))
+        if abs(bundled - declared) > 1e-9:
+            problems.append(f"bundle has {bundled}, manifest has {declared} — mixed build")
+    except Exception as exc:
+        problems.append(f"could not read bundle ({exc})")
+    result.add(
+        "logit_shift_sane",
+        not problems,
+        "; ".join(problems) or f"logit_shift={declared} (0.0 = no recentring)",
+    )
+
+
 def verify_sklearn_version(workdir: Path, result: VerifyResult) -> None:
     """Assert the bundle was built with the container's scikit-learn version.
 
@@ -930,6 +961,7 @@ def verify(
         verify_sklearn_version(bundle_dir, result)
         verify_feature_order(bundle_dir, result)
         encoder_shipped = verify_encoder_assets(bundle_dir, result)
+        verify_logit_shift(bundle_dir, result)
 
     main_src = sources.get("main.py", "")
     result.add(

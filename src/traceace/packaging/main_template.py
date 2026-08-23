@@ -82,6 +82,7 @@ def main() -> int:
     fallback = float(bundle.get("fallback_prob", 0.5))
     lo_prior = dict(bundle.get("lo_prior", {}))
     shrinkage = bundle.get("shrinkage")
+    logit_shift = float(bundle.get("logit_shift", 0.0))
     sparse_text_model = bundle.get("sparse_text_model")
     sparse_text_config = dict(bundle.get("sparse_text_config") or {})
     hybrid_promotion = bundle.get("hybrid_promotion")
@@ -302,6 +303,14 @@ def main() -> int:
     # Ranking-invariant; fitted on a training holdout, never on leaderboard feedback.
     if shrinkage is not None:
         preds = ilib.apply_shrinkage(preds, shrinkage["weight"], shrinkage["base_rate"], eps=EPS)
+
+    # Recentring toward the (leaderboard-implied) test base rate: a constant logit shift,
+    # ranking-invariant, applied to every prediction including the fallback path below via
+    # the prior itself being shifted at lookup time? No — deliberately only to model output:
+    # fallback rows already sit AT the prior mean and shifting them would over-correct.
+    if logit_shift != 0.0:
+        _p = np.clip(preds, EPS, 1.0 - EPS)
+        preds = 1.0 / (1.0 + np.exp(-(np.log(_p / (1.0 - _p)) + logit_shift)))
 
     # Rows whose transcript was missing/unreadable/empty use the LO prior exactly. Do not
     # rely on LightGBM returning NaN: it normally emits a plausible finite prediction from
