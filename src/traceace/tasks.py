@@ -72,6 +72,7 @@ _TASK_MODULES = [
     "traceace.evaluate",
     "traceace.objective_eval",
     "traceace.objective_repeated",
+    "traceace.arm_diversity",
     "traceace.interpret",
     "traceace.experiments",
     "traceace.unseen_lo",
