@@ -56,6 +56,7 @@ _TASK_MODULES = [
     "traceace.models.hierarchical_transformer",
     "traceace.models.move_classifier",
     "traceace.models.transcript_encoder",
+    "traceace.models.dapt",
     "traceace.features.structural",
     "traceace.features.linguistic",
     "traceace.features.temporal",
