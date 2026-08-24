@@ -1,48 +1,74 @@
 # STATE.md — read this first
 
-**Last updated:** 2026-08-19 · **CI: green ✅**
+**Last updated:** 2026-08-24 · **CI: green ✅**
 
-> ## ⚡ 2026-08-19 — encoder campaign status (supersedes everything below; details in [`ENDGAME.md`](ENDGAME.md))
+> ## ⚡ 2026-08-24 — LIVE CAMPAIGN STATE (supersedes everything below; plan in [`ENDGAME.md`](ENDGAME.md))
 >
-> **Fold-0 probes on the A100 (67 units spent, ~666 left):**
+> **Leaderboard: 0.6091 / AUROC 0.6097 / rank ~#87.** Submission #1 of the endgame
+> (GBDT + `probe.enc_wide` at encoder weight 0.378) scored 2026-08-23. Score improved from
+> 0.6106 and **test AUROC rose 0.6014 → 0.6097 — the first banked discrimination gain of the
+> project.** The rank drop is the field flooding in the final week, not model regression.
+> **2 submissions left. Budget ~600 / 733 CU. Deadline 2026-08-28 05:59 Bangladesh time.**
 >
-> | config | solo AUC | blend w/ honest GBDT (0.6091) | verdict |
-> |---|---|---|---|
-> | ModernBERT 2048 tok / 4 win | 0.5738 | 0.6167 (w=0.15) | context-starved |
-> | **ModernBERT 3072 tok / 6 win** | **0.5979** | **0.6235 (w=0.25)** | ✅ **winner — clears the 0.622 top-15 line on fold 0** |
-> | Qwen3-0.6B 2048 / 4 | 0.5774 | 0.6173 (w=0.20) | 3× cost, no gain — rejected |
+> ### The recalibration that governs every estimate now
+> Honest CV said blend 0.6256; test delivered 0.6097. The AUROC→log-loss law held (predicts
+> 0.6080 from the actual AUROC, off by 0.001) — what missed was the CV→test AUROC step.
+> Causes: best-epoch selection optimism (~+0.006), within-fold vs pooled-AUROC mismatch
+> (structural), and CV noise (±0.012).
+> > **Working rule: test AUROC ≈ honest CV − 0.015, ±0.010.**
+> > Top-15 at deadline projects to LL ~0.600 → test AUROC ~0.633 → **CV ~0.648 needed.**
 >
-> Lesson: the bottleneck was dialogue *quantity*, not model capacity. Epoch curves:
-> wide config still climbing at epoch 3 (0.534→0.593→0.598); baseline overfits after ep2.
+> ### Encoder results (objective-disjoint, within-fold AUROC)
+> | config | 5-fold CV | note |
+> |---|---|---|
+> | `probe.enc_wide` (3072 tok / 6 win) | **0.6137 ± 0.0183** | shipped in submission #1 |
+> | `probe.enc_x10` (4096 tok / 10 win) | *in flight, ~14:50 Aug 24* | fold 0 **0.6109**, fold 1 **0.6235** |
 >
-> **Full 5-fold run** (`experiment="probe.enc_wide"`, epochs=3, lr 3e-5, 3072/6,
-> objective-disjoint, ~66 units): operator launches/launched it with
-> `shutdown_after=True`. It auto-assembles the OOF and prints the honest
-> `within_objective_fold_auc` + projected LB. Fold 0 was the GBDT's best fold, so the
-> 5-fold mean will read below 0.6235 — that is composition, not decay.
+> Per-fold, the two encoders win *different* folds (x10 wins fold 0 by +0.013; wide wins
+> fold 1 by +0.005) — decorrelation that argues for blending both rather than replacing.
+> Fold-0 blend evidence: x10 **0.6324** vs wide **0.6235**, and correlation with the GBDT
+> *fell* 0.426 → 0.370 while solo AUC rose. Wider retrieval reads something genuinely new.
 >
-> **Encoder packaging is BUILT and VERIFIED** (`f480c51`): weights/tokenizer/config
-> vendored, offline inference in `encoder_lib.py`, logit blend at an explicit
-> `encoder_weight`, 28/28 verify checks green incl. parity + OOF replay through the
-> blended pipeline. Smoke: 100 rows in 64 s → projected **1.87 h** vs the 6 h cap.
+> ### Machinery built and verified since the last update
+> - **N-encoder ensembles ship** (`84c69cf`): `encoder_experiments=[...]` +
+>   `encoder_weights=[...]`, per-member tokenizer/config/folds, per-member window widths,
+>   abstain-aware weight renormalisation. 29/29 verify checks on a two-encoder fixture.
+> - **Inference throughput** (`84c69cf`): batch 16 → 64 with an OOM-halving fallback. One
+>   encoder projected 1.44 h; two now project 2.76 h against the 6 h cap.
+> - **Final recentring** (`9114b22`): `submission.build(logit_shift=-0.040)`, bundled +
+>   manifest cross-checked by `logit_shift_sane`, build refuses |shift| > 0.1.
+> - **Drive durability** (`ce375dc`, `7061fcc`): mount-liveness probe, fatal sync failure,
+>   per-file mirrors, FUSE flush before shutdown, and mirrors merged on restore.
+>   Post-mortem: a dead mount silently ate 4 trained folds on 2026-08-22.
+> - Container tokenizer fix (`1556535`) after submission job id-6296 failed on
+>   `TokenizerClass TokenizersBackend`.
 >
-> **Next, in order:** (1) read the full-run OOF number; (2) blend with
-> `model.gbdt_objective`, re-run `evaluate.by_objective_fold`; (3) if the blend holds
-> ≥ ~0.615, `submission.build(experiment="model.gbdt", encoder_experiment="probe.enc_wide",
-> encoder_weight=<measured>)` → smoke → **spend a slot**; (4) levers left: second-seed
-> encoder ensemble (~+0.003–0.005), move-taxonomy features (write-up centrepiece).
-> Recentring half-way to ≈0.694 is applied only to the FINAL Aug-27 submission.
+> ### Next actions, in order
+> 1. Read `probe.enc_x10`'s 5-fold `within_objective_fold_auc` (~14:50 Aug 24).
+> 2. **3-arm blend** — `ensemble.blend(experiments=["model.gbdt_objective",
+>    "probe.enc_wide", "probe.enc_x10"], output_experiment="ensemble.tri")` →
+>    `evaluate.by_objective_fold`. **Bar to beat: `ensemble.dialogue` at 0.6256.**
+> 3. Build with the printed simplex weights → smoke → **platform smoke test (mandatory,
+>    5/day, free)** → **submission #2**.
+> 4. Nights of Aug 25/26: seed ensemble of the winning config (multi-encoder packaging now
+>    makes this shippable). Aug 27: final ensemble + `logit_shift=-0.040` → **submission #3**.
+>
+> **Doctrine that keeps paying:** never spend a slot without a platform smoke test first;
+> never promote an objective-fold A/B below ~0.01 AUROC on one fold assignment
+> (`evaluate.objective_repeated`, paired SD ~0.037); never trust a Drive write that has not
+> round-tripped.
 
-All numbers below are mean ± SD over 5 fold assignments (2026-07-31 state).
-**Competition deadline:** model submissions 2026-08-27 23:59 UTC · write-up 2026-09-15
-**Entry:** solo · **Units remaining: 728.97 / 733**
+---
+
+### Historical record below (2026-07-31 → 2026-08-19). Superseded by the section above.
+All numbers are mean ± SD over 5 fold assignments. **Entry:** solo.
 
 > New session? Read [`../CLAUDE.md`](../CLAUDE.md) → [`BRIEF.md`](BRIEF.md) → this file.
 > Then [`DATA.md`](DATA.md) for measured facts and [`RUNBOOK.md`](RUNBOOK.md) for recipes.
 
 ---
 
-## Status: SUBMISSION 2 SCORED 0.6106 · rank #45 · one slot remains this week
+## Status (historical): submission 0.6106 · rank #45 at the time
 
 **Leaderboard history**
 
@@ -50,7 +76,9 @@ All numbers below are mean ± SD over 5 fold assignments (2026-07-31 state).
 |---|---|---|---|---|---|
 | 1 | 2723 | 0.8006 | 0.4933 | #229 | 🔴 **broken** — feature-order permutation (ADR-013) |
 | 2 | — | — | — | — | (slot spent on a smoke test) |
-| 2 | — | **0.6106** | **0.6014** | **#45** | 🟡 works, but **overconfident** |
+| 2 | — | **0.6106** | **0.6014** | **#45** | 🟡 works — diagnosis below was wrong, see top |
+| 3 | 6296 | — | — | — | 🔴 **failed** — container tokenizer class (fixed, `1556535`); no slot burned |
+| 4 | 6311 | **0.6091** | **0.6097** | **~#87** | 🟢 **current best** — GBDT + `probe.enc_wide` @ w=0.378 |
 
 **Submission 3 is the real baseline.**
 
